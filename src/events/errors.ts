@@ -1,6 +1,6 @@
 import { appBuild, loadLastContext, saveLastContext, staticFields } from '../core/context';
 import { LOG_PREFIX } from '../core/logger';
-import { native, storage } from '../core/native';
+import { native, storage, type NativeCrash } from '../core/native';
 import { persistOutbox } from '../core/transport';
 import { attributesJSON, emit, emitRaw } from './emit';
 import { isoTime } from '../core/clock';
@@ -10,6 +10,16 @@ const MAX_MESSAGE_CHARS = 4_000;
 const MAX_CONSOLE_CHARS = 8_000;
 /** Native code skips its own report of a JS fatal it sees within this window. */
 export const JS_CRASH_MARKER_KEY = 'js_crash_marker';
+/** A JS fatal error ends in a native crash within this time. */
+const JS_CRASH_WINDOW_MS = 10_000;
+/**
+ * The native crash types that a JS fatal error ends in: React Native
+ * raises RCTFatalException on iOS and JavascriptException on Android, and
+ * both can end in abort().
+ */
+const JS_FATAL_NATIVE_TYPE = /^(SIGABRT\b|RCTFatalException|[\w.$]*JavascriptException\b)/;
+/** The time a fatal JS error waits before it goes to the next handler. */
+export const FATAL_HANDOFF_DELAY_MS = 200;
 
 export type ErrorSource =
   | 'source'
@@ -90,6 +100,8 @@ interface ErrorUtilsLike {
 
 let previousHandler: GlobalHandler | null = null;
 let errorTrackingInstalled = false;
+/** True from a fatal error until the next handler gets it. */
+let fatalPending = false;
 
 function errorUtils(): ErrorUtilsLike | null {
   const eu = (globalThis as unknown as { ErrorUtils?: ErrorUtilsLike }).ErrorUtils;
@@ -103,11 +115,19 @@ function errorUtils(): ErrorUtilsLike | null {
  * It is not also sent now. A send can reach the collector in the moment
  * before the process ends, and the next start would then send the same
  * crash from disk, so it counts two times.
+ *
+ * A fatal error goes to the next handler after FATAL_HANDOFF_DELAY_MS.
+ * React Native's own handler ends the process, and another crash reporter
+ * earlier in the chain (the Datadog SDK) writes its report on native
+ * background queues. Without the wait, its report can be lost. Oodle's
+ * report is already on disk, so the wait does not risk it.
  */
 function handleGlobalError(error: unknown, isFatal?: boolean) {
+  // A second fatal error while the first waits is the same crash.
+  const record = !(isFatal && fatalPending);
   try {
-    addError(error, undefined, 'source', Boolean(isFatal));
-    if (isFatal) {
+    if (record) addError(error, undefined, 'source', Boolean(isFatal));
+    if (isFatal && record) {
       storage.set(JS_CRASH_MARKER_KEY, String(Date.now()));
       saveLastContext();
       persistOutbox({ sync: true });
@@ -115,7 +135,17 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
   } catch {
     // never stop the app's own handler from running
   }
-  if (previousHandler) previousHandler(error, isFatal);
+  const next = previousHandler;
+  if (!next) return;
+  if (!isFatal) {
+    next(error, isFatal);
+    return;
+  }
+  fatalPending = true;
+  setTimeout(() => {
+    fatalPending = false;
+    next(error, isFatal);
+  }, FATAL_HANDOFF_DELAY_MS);
 }
 
 export function installErrorTracking() {
@@ -217,10 +247,26 @@ export function uninstallConsoleTracking() {
 
 // --- Crash from the previous run, and native stalls ---
 
+/**
+ * A JS fatal error also ends in a native crash, which the native handlers
+ * can record before the JS handler has written its marker (on iOS, the
+ * abort() can come first). The JS handler already recorded that crash with
+ * its JS stack, so its native copy is not sent.
+ */
+function isNativeCopyOfJsFatal(crash: NativeCrash, jsFatalAt: number): boolean {
+  return (
+    jsFatalAt > 0 &&
+    JS_FATAL_NATIVE_TYPE.test(crash.type || '') &&
+    Math.abs((crash.timestamp || 0) - jsFatalAt) < JS_CRASH_WINDOW_MS
+  );
+}
+
 /** Sends the native crash that ended the last run, on the session it happened in. */
 export function reportPendingCrash() {
   const crash = native.consumePendingCrash();
-  if (!crash) return;
+  const jsFatalAt = Number(storage.get(JS_CRASH_MARKER_KEY)) || 0;
+  if (jsFatalAt) storage.remove(JS_CRASH_MARKER_KEY);
+  if (!crash || isNativeCopyOfJsFatal(crash, jsFatalAt)) return;
   const last = loadLastContext();
   if (last && last.sampled === false) return;
   const user = (last?.user ?? null) as Record<string, unknown> | null;
