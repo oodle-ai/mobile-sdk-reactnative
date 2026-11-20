@@ -1,0 +1,93 @@
+{
+  "name": "@oodle-ai/mobile-sdk-reactnative",
+  "version": "0.1.0",
+  "description": "Oodle Real User Monitoring SDK for React Native",
+  "keywords": [
+    "react-native",
+    "rum",
+    "real-user-monitoring",
+    "session-replay",
+    "observability",
+    "opentelemetry",
+    "oodle",
+    "crash-reporting",
+    "android",
+    "ios"
+  ],
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oodle-ai/mobile-sdk-reactnative.git"
+  },
+  "bugs": {
+    "url": "https://github.com/oodle-ai/mobile-sdk-reactnative/issues"
+  },
+  "homepage": "https://docs.oodle.ai/integrations/rum/react-native",
+  "author": "Oodle AI",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "files": [
+    "src",
+    "lib",
+    "bin",
+    "android/build.gradle",
+    "android/proguard-rules.pro",
+    "android/src",
+    "ios",
+    "OodleMobileSdkReactNative.podspec",
+    "react-native.config.js",
+    "!**/__tests__",
+    "!**/*.test.ts"
+  ],
+  "scripts": {
+    "build": "node -e \"require('fs').rmSync('lib',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "prepack": "npm run build",
+    "mock-collector": "node scripts/mock-collector.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18",
+    "react-native": ">=0.79"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "jsdom": "^31.0.1",
+    "react": "^19.1.0",
+    "rrweb": "2.1.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.1.1"
+  },
+  "codegenConfig": {
+    "name": "OodleRumSpec",
+    "type": "modules",
+    "jsSrcsDir": "src/specs",
+    "android": {
+      "javaPackageName": "ai.oodle.rum"
+    },
+    "ios": {
+      "modulesProvider": {
+        "OodleRum": "OodleRum"
+      }
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pnpm": {
+    "overrides": {
+      "rrweb-snapshot": "2.1.1"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "oodle-rum-upload": "bin/oodle-rum-upload.mjs"
+  }
+}
