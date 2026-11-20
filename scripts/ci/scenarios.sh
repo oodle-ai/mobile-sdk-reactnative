@@ -44,6 +44,14 @@ if [ "$PLATFORM" = android ]; then
   sleep 3
   adb wait-for-device
   if [ "$(adb shell id -u | tr -d '\r')" = 0 ]; then CAN_SIGNAL=1; fi
+  # The second crash of an app within a minute shows the "keeps stopping"
+  # dialog, and the process does not end until the dialog is closed. The
+  # scenarios crash the app one after another, so the dialogs are off.
+  adb shell settings put global hide_error_dialogs 1
+  # The device log of the scenarios is kept with the collector data, for
+  # a run that fails.
+  adb logcat -c || true
+  trap 'adb logcat -d > "$OUT/scenarios-logcat.txt" 2> /dev/null || true' EXIT
 else
   BUNDLE=org.reactjs.native.example.OodleExample
   app_pid() {

@@ -103,7 +103,9 @@ class FakeXHR {
 // --- React Native's global error handler ---
 
 type GlobalHandler = (error: unknown, isFatal?: boolean) => void;
-let globalHandler: GlobalHandler = () => {};
+/** React Native's own handler, which ends the process on a fatal error. */
+const rnDefaultHandler = vi.fn<GlobalHandler>();
+let globalHandler: GlobalHandler = rnDefaultHandler;
 (globalThis as unknown as { ErrorUtils: unknown }).ErrorUtils = {
   getGlobalHandler: () => globalHandler,
   setGlobalHandler: (h: GlobalHandler) => {
@@ -226,10 +228,12 @@ describe('OodleRum end to end', () => {
       app_screen_name: 'Orders',
       user_id: 'driver-ava',
       service_version: '0.9.0',
-      app_build: '41',
+      app_build_id: '41',
       platform: 'react-native',
       device_model_identifier: 'Pixel 7 Pro',
     });
+    // The context was saved by 0.1.0, under app_build.
+    expect(crash).not.toHaveProperty('app_build');
   });
 
   it('records views with mobile context and vitals', async () => {
@@ -250,7 +254,7 @@ describe('OodleRum end to end', () => {
       device_manufacturer: 'Google',
       device_model_identifier: 'Pixel 7 Pro',
       service_version: '1.0.0',
-      app_build: '42',
+      app_build_id: '42',
       process_runtime_name: 'React Native',
       network_connection_type: 'wifi',
       app_installation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -465,16 +469,45 @@ describe('OodleRum end to end', () => {
       history
         .flatMap((u) => u.sections.events ?? [])
         .filter((e) => e.error_is_crash === 1 && String(e.exception_message).includes('fatal in test'));
+    const errors = await import('../src/events/errors');
     globalHandler(new Error('fatal in test'), true);
-    // In a release build the process ends soon after the handler returns,
-    // but a send that already started can still reach the collector.
-    await vi.advanceTimersByTimeAsync(100);
+    // The crash is on disk before React Native's handler ends the process.
     expect(store.get('outbox')).toContain('fatal in test');
+    // A second fatal error while the first waits is the same crash.
+    globalHandler(new Error('fatal in test, again'), true);
+    // React Native's handler gets the error after the wait, so that other
+    // crash reporters in the chain can finish writing.
+    await vi.advanceTimersByTimeAsync(errors.FATAL_HANDOFF_DELAY_MS - 1);
+    expect(rnDefaultHandler).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(rnDefaultHandler).toHaveBeenCalledWith(expect.objectContaining({ message: 'fatal in test' }), true);
 
+    // The next start. The fatal error ended in abort(), which the native
+    // handler also recorded: that copy is not sent.
+    const fatalAt = Number(store.get('js_crash_marker'));
+    expect(fatalAt).toBeGreaterThan(0);
+    pendingCrash = JSON.stringify({
+      timestamp: fatalAt + 5,
+      type: 'SIGABRT',
+      message: 'Application crashed with SIGABRT',
+      stack: '',
+      source: 'ios',
+    });
+    // As init() does on a new start.
     transport.resetTransport();
     transport.setPoster(collectorPoster);
+    errors.reportPendingCrash();
+    expect(store.has('js_crash_marker')).toBe(false);
     transport.restoreOutbox();
     await settle();
     expect(crashes()).toHaveLength(1);
+    expect(history.flatMap((u) => u.sections.events ?? []).filter((e) => e.exception_type === 'SIGABRT')).toHaveLength(0);
+    expect(history.flatMap((u) => u.sections.events ?? []).filter((e) => String(e.exception_message).includes('again'))).toHaveLength(0);
+
+    // Without a JS fatal error just before it, a SIGABRT is a crash of its own.
+    pendingCrash = JSON.stringify({ timestamp: Date.now(), type: 'SIGABRT', message: 'abort', stack: '', source: 'ios' });
+    errors.reportPendingCrash();
+    await settle();
+    expect(events('error').filter((e) => e.exception_type === 'SIGABRT')).toHaveLength(1);
   });
 });
