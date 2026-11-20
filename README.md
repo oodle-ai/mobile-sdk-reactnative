@@ -101,7 +101,7 @@ OodleSessionReplay.start() / .stop() / .isRecording()
 | `trackInteractions` | `true` | Taps, through `OodleProvider` |
 | `useAccessibilityLabel` | `true` | Name taps by `accessibilityLabel` |
 | `actionNameAttribute` | `'oodle-action-name'` | Prop that names a tap |
-| `trackResources` | `true` | XHR and fetch (React Native's fetch runs on XHR) |
+| `trackResources` | `true` | XHR and fetch, including the native fetch of Expo SDK 52 and later |
 | `trackErrors` | `true` | Global JS errors and unhandled promise rejections |
 | `trackConsole` | `true` | `console.error` and `console.warn` |
 | `allowedTracingUrls` | `[]` | Hosts, URL prefixes, RegExps or functions; `{ match, propagators }` picks `tracecontext`, `b3`, `b3multi`, `datadog` |

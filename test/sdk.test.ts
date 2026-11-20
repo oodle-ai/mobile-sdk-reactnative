@@ -100,6 +100,27 @@ class FakeXHR {
 }
 (globalThis as unknown as { XMLHttpRequest: unknown }).XMLHttpRequest = FakeXHR;
 
+// --- The app's fetch ---
+// Expo replaces fetch with a native one that does not use XHR. A URL with
+// "polyfill" behaves as React Native's own fetch, which runs on XHR.
+const fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
+const fakeFetch = vi.fn((input: unknown, init?: { headers?: Record<string, string> }) => {
+  const url = String(input);
+  fetchCalls.push({ url, headers: { ...(init?.headers ?? {}) } });
+  if (url.includes('polyfill')) {
+    const xhr = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
+    xhr.open('GET', url);
+    return new Promise((resolve) => {
+      xhr.addEventListener('loadend', () => resolve({ status: 200, headers: { get: () => '7' } }));
+      xhr.send();
+    });
+  }
+  return new Promise((resolve) =>
+    setTimeout(() => resolve({ status: 201, headers: { get: (n: string) => (n === 'content-length' ? '12' : null) } }), 5),
+  );
+});
+(globalThis as unknown as { fetch: unknown }).fetch = fakeFetch;
+
 // --- React Native's global error handler ---
 
 type GlobalHandler = (error: unknown, isFatal?: boolean) => void;
@@ -342,6 +363,35 @@ describe('OodleRum end to end', () => {
     });
     expect(traced.trace_id).toBe(headers.traceparent.split('-')[1]);
     expect(events('error').find((e) => e.error_source === 'network')).toBeDefined();
+  });
+
+  it('records fetch calls once, with trace headers', async () => {
+    const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    const pending = appFetch('https://api.fieldwork.test/api/trpc/workflow.execute?batch=1', {
+      method: 'post',
+      headers: { 'content-type': 'application/json' },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect((await pending).status).toBe(201);
+    const sent = fetchCalls.find((c) => c.url.includes('workflow.execute'))!;
+    expect(sent.headers['content-type']).toBe('application/json');
+    expect(sent.headers.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    // React Native's own fetch runs on XHR: still one resource.
+    const polyfill = appFetch('https://cdn.other.test/polyfill.json');
+    await vi.advanceTimersByTimeAsync(10);
+    await polyfill;
+    await settle();
+    const resources = events('resource');
+    const call = resources.find((r) => String(r.url_full).includes('workflow.execute'))!;
+    expect(call).toMatchObject({
+      url_full: 'https://api.fieldwork.test/api/trpc/workflow.execute',
+      http_request_method: 'POST',
+      http_response_status_code: 201,
+      http_response_body_size: 12,
+      resource_type: 'fetch',
+    });
+    expect(call.trace_id).toBe(sent.headers.traceparent.split('-')[1]);
+    expect(resources.filter((r) => String(r.url_full).includes('polyfill'))).toHaveLength(1);
   });
 
   // Another tracing SDK (or the app) set the header first: it is kept,
