@@ -87,7 +87,7 @@ function staticContext(): Record<string, string> {
     service_name: service,
     deployment_environment_name: c?.env ?? '',
     service_version: version,
-    app_build: appBuild(),
+    app_build_id: appBuild(),
     device_type: d.deviceType,
     device_manufacturer: d.brand,
     device_model_identifier: d.model,
@@ -157,7 +157,7 @@ export function saveLastContext() {
     user: user ? { ...user } : null,
     tags: getTags(),
     version: appVersion(),
-    app_build: appBuild(),
+    app_build_id: appBuild(),
   });
 }
 
@@ -169,7 +169,9 @@ export interface LastContext {
   user: Record<string, unknown> | null;
   tags: Record<string, string>;
   version: string;
-  app_build: string;
+  app_build_id: string;
+  /** The name that version 0.1.0 saved the build under. */
+  app_build?: string;
 }
 
 export function loadLastContext(): LastContext | null {

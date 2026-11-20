@@ -226,10 +226,12 @@ describe('OodleRum end to end', () => {
       app_screen_name: 'Orders',
       user_id: 'driver-ava',
       service_version: '0.9.0',
-      app_build: '41',
+      app_build_id: '41',
       platform: 'react-native',
       device_model_identifier: 'Pixel 7 Pro',
     });
+    // The context was saved by 0.1.0, under app_build.
+    expect(crash).not.toHaveProperty('app_build');
   });
 
   it('records views with mobile context and vitals', async () => {
@@ -250,7 +252,7 @@ describe('OodleRum end to end', () => {
       device_manufacturer: 'Google',
       device_model_identifier: 'Pixel 7 Pro',
       service_version: '1.0.0',
-      app_build: '42',
+      app_build_id: '42',
       process_runtime_name: 'React Native',
       network_connection_type: 'wifi',
       app_installation_id: expect.stringMatching(/^[0-9a-f-]{36}$/),

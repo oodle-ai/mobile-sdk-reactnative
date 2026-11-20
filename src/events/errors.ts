@@ -228,7 +228,7 @@ export function reportPendingCrash() {
   emitRaw({
     ...fields,
     service_version: last?.version || fields.service_version,
-    app_build: last?.app_build || appBuild(),
+    app_build_id: last?.app_build_id || last?.app_build || appBuild(),
     session_id: last?.session_id ?? '',
     user_id: user?.id ? String(user.id) : '',
     user_name: user?.name ? String(user.name) : '',
