@@ -44,9 +44,14 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 - Methods that return a value are synchronous on purpose: the fatal JS
   handler must write to disk before the process ends.
 - A JS fatal also reaches native code (JavascriptException,
-  RCTFatalException). The JS handler writes `js_crash_marker` first, and
-  native code skips a JS fatal within 10 s of it, so it is not reported
-  twice.
+  RCTFatalException, or a SIGABRT from abort()). The JS handler writes
+  `js_crash_marker`, and native code skips a JS fatal within 10 s of it.
+  The abort() can come before the marker, so the next start also drops a
+  native crash of those types within 10 s of the marker
+  (`reportPendingCrash`). Each JS fatal is reported once.
+- The JS handler passes a fatal error on after `FATAL_HANDOFF_DELAY_MS`.
+  React Native's handler ends the process, and a crash reporter earlier
+  in the chain (the reference SDK) writes its report on native queues.
 
 ## Tests
 
@@ -59,9 +64,13 @@ run, then crash and offline scenarios. The app reads each scenario from
 the mock collector (`/fixture/scenario`), so a new scenario needs no
 native change to the app. A scenario that must end the app from outside
 (a signal, `am crash`, a kill) does that in `scenarios.sh`; the app only
-sends `scenario:<name>`, so the checks can find the session. The fixture
-sends reference data to the mock collector too, and each crash check also
-requires a reference crash report. A crash handler that does not pass a
+sends `scenario:<name>`, so the checks can find the session. The
+emulator has `hide_error_dialogs` set: the second crash within a minute
+shows a dialog that keeps the process alive. The fixture sends the reference SDK
+data to the mock collector too (over plain HTTP, which the reference
+Android SDK needs `_dd.needsClearTextHttp` for), and each crash check
+also requires a reference crash report. A failed Android run keeps the
+device log in `scenarios-logcat.txt` in the collector artifact. A crash handler that does not pass a
 crash on breaks the other SDK, and that is what customers who move from
 reference run.
 

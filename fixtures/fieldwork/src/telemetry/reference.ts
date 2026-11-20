@@ -43,6 +43,9 @@ export const reference: Telemetry = {
         // Oodle SDK was installed next to it.
         uploadFrequency: UploadFrequency.FREQUENT,
         batchSize: BatchSize.SMALL,
+        // The mock collector is plain HTTP. The reference Android SDK sends
+        // only over TLS unless this is set; iOS does not read it.
+        additionalConfiguration: { '_dd.needsClearTextHttp': true },
         rumConfiguration: {
           customEndpoint: `${collectorUrl}/reference/rum`,
           applicationId: referenceConfig.applicationId,
