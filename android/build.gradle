@@ -1,0 +1,55 @@
+buildscript {
+  repositories {
+    google()
+    mavenCentral()
+  }
+}
+
+def getExtOrDefault(name, defaultValue) {
+  return rootProject.ext.has(name) ? rootProject.ext.get(name) : defaultValue
+}
+
+apply plugin: "com.android.library"
+// AGP 9 can ship Kotlin support itself and registers the `kotlin`
+// extension. Applying the Kotlin plugin again fails configuration.
+if (project.extensions.findByName("kotlin") == null) {
+  apply plugin: "kotlin-android"
+}
+// Runs codegen for src/specs, which generates NativeOodleRumSpec.
+apply plugin: "com.facebook.react"
+
+android {
+  namespace "ai.oodle.rum"
+  compileSdkVersion getExtOrDefault("compileSdkVersion", 35)
+
+  defaultConfig {
+    minSdkVersion getExtOrDefault("minSdkVersion", 24)
+    targetSdkVersion getExtOrDefault("targetSdkVersion", 35)
+    consumerProguardFiles "proguard-rules.pro"
+  }
+
+  buildTypes {
+    release {
+      minifyEnabled false
+    }
+  }
+
+  lintOptions {
+    abortOnError false
+  }
+}
+
+react {
+  jsRootDir = file("../src/")
+  libraryName = "OodleRumSpec"
+  codegenJavaPackageName = "ai.oodle.rum"
+}
+
+repositories {
+  google()
+  mavenCentral()
+}
+
+dependencies {
+  implementation "com.facebook.react:react-android"
+}
