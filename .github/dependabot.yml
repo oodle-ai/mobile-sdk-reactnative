@@ -1,0 +1,29 @@
+version: 2
+updates:
+  # The workflow actions are pinned to commit SHAs; Dependabot moves the
+  # pins to new releases, in one pull request.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']
+    ignore:
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # Replay events must match the rrweb version of the Oodle replay
+      # player, so rrweb changes only together with the player.
+      - dependency-name: rrweb
+      - dependency-name: rrweb-snapshot
+      - dependency-name: '*'
+        update-types: ['version-update:semver-major']
