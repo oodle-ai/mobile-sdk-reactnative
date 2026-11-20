@@ -6,6 +6,7 @@ import {
   EventType,
   IncrementalSource,
   WireframeRecorder,
+  styleFor,
   visibleText,
   type RRWebEvent,
   type Wireframe,
@@ -157,5 +158,33 @@ describe('privacy', () => {
     const json = JSON.stringify(r.apply(snap([root, title, input]), 1, 'h').events);
     expect(json).not.toContain('Inbox');
     expect(json).not.toContain('secret');
+  });
+});
+
+describe('styleFor', () => {
+  const base = { id: 1, x: 0, y: 0, w: 40, h: 20 };
+
+  it('draws the device lines of a text without wrapping or clipping them', () => {
+    const style = styleFor({ ...base, k: 't', tx: 'Office', ln: true, lh: 21, ls: -0.8, fw: 600 });
+    expect(style).toContain('white-space:pre');
+    expect(style).toContain('overflow:visible');
+    expect(style).toContain('line-height:21px');
+    expect(style).toContain('letter-spacing:-0.8px');
+    expect(style).toContain('font-weight:600');
+    expect(style).not.toContain('pre-wrap');
+  });
+
+  it('wraps a text without device lines, as before', () => {
+    const style = styleFor({ ...base, k: 't', tx: 'Office' });
+    expect(style).toContain('white-space:pre-wrap');
+    expect(style).toContain('overflow:hidden');
+    expect(style).toContain('line-height:1.2');
+  });
+
+  it('draws the picture of a vector drawing, and only a PNG data URL', () => {
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    expect(styleFor({ ...base, k: 'v', img: png })).toContain(`background-image:url(${png})`);
+    expect(styleFor({ ...base, k: 'v', img: 'https://example.com/x.png' })).not.toContain('background-image');
+    expect(styleFor({ ...base, k: 'v' })).toContain('background-color:rgba(127,127,127,0.25)');
   });
 });
