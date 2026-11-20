@@ -1,6 +1,8 @@
 package ai.oodle.rum
 
 import android.app.Activity
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
@@ -8,7 +10,12 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.SystemClock
 import android.text.InputType
+import android.text.Layout
+import android.text.Spanned
+import android.text.TextPaint
 import android.text.method.PasswordTransformationMethod
+import android.text.style.CharacterStyle
+import android.util.Base64
 import android.view.Gravity
 import android.view.SurfaceView
 import android.view.TextureView
@@ -27,7 +34,11 @@ import com.facebook.react.uimanager.style.BorderRadiusProp
 import com.facebook.react.uimanager.style.LogicalEdge
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.util.WeakHashMap
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.roundToInt
 
 /**
  * Walks the visible view tree and describes each view that draws
@@ -170,7 +181,13 @@ object WireframeCapture {
     }
   }
 
-  private fun isLeaf(view: ViewGroup): Boolean = view is WebView
+  private fun isLeaf(view: ViewGroup): Boolean = view is WebView || isVector(view)
+
+  /**
+   * A react-native-svg drawing. Its shapes are views of their own, but the
+   * SvgView draws them all, so it is captured as one picture.
+   */
+  private fun isVector(view: View): Boolean = view.javaClass.name == "com.horcrux.svg.SvgView"
 
   private fun nativeId(view: View): String? =
     try {
@@ -220,13 +237,19 @@ object WireframeCapture {
         val n = box(view, if (text.isBlank()) "s" else "t", rect, visible, w, alpha)
         styleBox(n, view, bg, borderWidth, w)
         if (text.isNotBlank()) {
-          n.put("tx", text)
-          textStyle(n, view, w)
+          val layout = view.layout
+          if (layout != null && layout.lineCount > 0) {
+            layoutText(n, layout, w)
+          } else {
+            n.put("tx", text)
+            textStyle(n, view, w)
+          }
           pv?.let { n.put("pv", it) }
         }
         n
       }
       view.javaClass.simpleName == "PreparedLayoutTextView" -> preparedLayoutText(view, rect, visible, w, alpha, pv, bg, borderWidth)
+      isVector(view) -> vector(view, rect, visible, w, alpha, pv)
       view is ImageView -> box(view, "i", rect, visible, w, alpha).also { styleBox(it, view, null, 0f, w) }
       view is WebView -> box(view, "wv", rect, visible, w, alpha)
       view is SurfaceView || view is TextureView -> box(view, "p", rect, visible, w, alpha)
@@ -307,25 +330,115 @@ object WireframeCapture {
     try {
       val getter = view.javaClass.methods.first { it.name.startsWith("getPreparedLayout") && it.parameterCount == 0 }
       val prepared = getter.invoke(view) ?: return null
-      val layout = prepared.javaClass.getMethod("getLayout").invoke(prepared) as android.text.Layout
+      val layout = prepared.javaClass.getMethod("getLayout").invoke(prepared) as Layout
       val text = layout.text?.toString() ?: ""
       val n = box(view, if (text.isBlank()) "s" else "t", rect, visible, w, alpha)
       styleBox(n, view, bg, borderWidth, w)
       if (text.isNotBlank()) {
-        n.put("tx", text)
-        n.put("tc", css(layout.paint.color))
-        n.put("fs", round(layout.paint.textSize / w.density))
-        when (layout.alignment) {
-          android.text.Layout.Alignment.ALIGN_CENTER -> n.put("ta", "center")
-          android.text.Layout.Alignment.ALIGN_OPPOSITE -> n.put("ta", "right")
-          else -> {}
-        }
+        layoutText(n, layout, w)
         pv?.let { n.put("pv", it) }
       }
       n
     } catch (_: Throwable) {
       if (hasPaint(bg, borderWidth)) box(view, "s", rect, visible, w, alpha) else null
     }
+
+  /**
+   * The text of a laid out text view, as the device drew it. React Native
+   * sets the color, size, weight and letter spacing of a Text as spans,
+   * not on the view's paint, so they are read by applying the spans of the
+   * first character to a copy of the paint. The text goes with the
+   * device's line breaks ("ln") and line height, so the replay draws the
+   * same lines and does not wrap them again in another font.
+   */
+  private fun layoutText(n: JSONObject, layout: Layout, w: Walk) {
+    val text = layout.text ?: return
+    val lines = (0 until layout.lineCount).joinToString("\n") { i ->
+      text.subSequence(layout.getLineStart(i), layout.getLineEnd(i)).toString().trimEnd()
+    }
+    n.put("tx", lines)
+    n.put("ln", true)
+    val paint = TextPaint(layout.paint)
+    if (text is Spanned && text.isNotEmpty()) {
+      for (span in text.getSpans(0, 1, CharacterStyle::class.java)) {
+        try {
+          span.updateDrawState(paint)
+        } catch (_: Throwable) {
+          // A span that cannot apply to a copy keeps the paint as it is.
+        }
+      }
+    }
+    n.put("tc", css(paint.color))
+    n.put("fs", round(paint.textSize / w.density))
+    val weight = paintWeight(paint)
+    if (weight != 400) n.put("fw", weight)
+    if (paint.letterSpacing != 0f) n.put("ls", round(paint.letterSpacing * paint.textSize / w.density))
+    n.put("lh", round((layout.getLineBottom(0) - layout.getLineTop(0)) / w.density))
+    when (layout.alignment) {
+      Layout.Alignment.ALIGN_CENTER -> n.put("ta", "center")
+      Layout.Alignment.ALIGN_OPPOSITE -> n.put("ta", "right")
+      else -> {}
+    }
+  }
+
+  private fun paintWeight(paint: TextPaint): Int {
+    val tf = paint.typeface
+    return when {
+      tf != null && Build.VERSION.SDK_INT >= 28 -> tf.weight
+      tf?.isBold == true || paint.isFakeBoldText -> 700
+      else -> 400
+    }
+  }
+
+  /** The newest picture of each drawing, and when it was taken. */
+  private class VectorPicture(val key: String, val data: String, val at: Long)
+
+  private val pictures = WeakHashMap<View, VectorPicture>()
+
+  /** A drawing is drawn again at most this often. */
+  private const val VECTOR_REFRESH_MS = 2_000L
+  /** A larger drawing is a placeholder: its picture would be too big to send. */
+  private const val VECTOR_MAX_DP = 640f
+  private const val VECTOR_MAX_SCALE = 2f
+
+  /**
+   * A react-native-svg drawing as a PNG, at most twice its size in dp.
+   * Drawings are the app's own graphics (illustrations, icons), not user
+   * content, so they are recorded as they are, as Datadog records them;
+   * a mask or a hidden tag over them still applies.
+   */
+  private fun vector(view: View, rect: RectF, visible: RectF, w: Walk, alpha: Float, pv: String?): JSONObject {
+    val n = box(view, "v", rect, visible, w, alpha)
+    if (pv == "mask") return n
+    val wDp = view.width / w.density
+    val hDp = view.height / w.density
+    if (wDp > VECTOR_MAX_DP || hDp > VECTOR_MAX_DP) return n
+    val key = "${view.width}x${view.height}"
+    val now = SystemClock.uptimeMillis()
+    val cached = pictures[view]
+    if (cached != null && cached.key == key && now - cached.at < VECTOR_REFRESH_MS) {
+      n.put("img", cached.data)
+      return n
+    }
+    try {
+      val scale = min(w.density, VECTOR_MAX_SCALE)
+      val bw = max(1, (wDp * scale).roundToInt())
+      val bh = max(1, (hDp * scale).roundToInt())
+      val bitmap = Bitmap.createBitmap(bw, bh, Bitmap.Config.ARGB_8888)
+      val canvas = Canvas(bitmap)
+      canvas.scale(scale / w.density, scale / w.density)
+      view.draw(canvas)
+      val out = ByteArrayOutputStream()
+      bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+      bitmap.recycle()
+      val data = "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
+      pictures[view] = VectorPicture(key, data, now)
+      n.put("img", data)
+    } catch (_: Throwable) {
+      // The placeholder stays.
+    }
+    return n
+  }
 
   private fun isSensitive(view: EditText): Boolean {
     if (view.transformationMethod is PasswordTransformationMethod) return true

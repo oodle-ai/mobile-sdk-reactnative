@@ -9,7 +9,11 @@
  */
 import type { TextAndInputPrivacy } from '../core/config';
 
-export type WireframeKind = 's' | 't' | 'i' | 'in' | 'p' | 'h' | 'sw' | 'wv';
+/**
+ * s: a painted box, t: text, i: an image, v: a vector drawing, in: an
+ * input, p: a platform view, h: hidden, sw: a switch, wv: a web view.
+ */
+export type WireframeKind = 's' | 't' | 'i' | 'v' | 'in' | 'p' | 'h' | 'sw' | 'wv';
 
 export interface Wireframe {
   /** Stable for the life of the native view. */
@@ -32,7 +36,18 @@ export interface Wireframe {
   tc?: string;
   fs?: number;
   fw?: number;
+  /** Letter spacing, in dp. */
+  ls?: number;
+  /** Line height, in dp. */
+  lh?: number;
+  /**
+   * The text holds the device's line breaks: the replay draws those lines
+   * and does not wrap them again, in a font that is not the device's.
+   */
+  ln?: boolean;
   ta?: 'left' | 'center' | 'right';
+  /** The picture of a vector drawing, as a data URL. */
+  img?: string;
   /** Switch state. */
   on?: boolean;
   /** Privacy override from an OodlePrivacy wrapper. */
@@ -160,6 +175,17 @@ export function styleFor(w: Wireframe): string {
     case 'i':
       parts.push('background-color:rgba(127,127,127,0.25)');
       break;
+    case 'v':
+      if (w.img && w.img.startsWith('data:image/png;base64,')) {
+        parts.push(
+          `background-image:url(${w.img})`,
+          'background-size:100% 100%',
+          'background-repeat:no-repeat',
+        );
+      } else {
+        parts.push('background-color:rgba(127,127,127,0.25)');
+      }
+      break;
     case 'p':
     case 'h':
     case 'wv':
@@ -195,11 +221,17 @@ export function styleFor(w: Wireframe): string {
       `font-weight:${w.fw ?? 400}`,
       `font-family:${FONT}`,
       `text-align:${align}`,
-      'line-height:1.2',
-      'white-space:pre-wrap',
-      'overflow:hidden',
-      'word-break:break-word',
+      `line-height:${w.lh ? px(w.lh) : '1.2'}`,
     );
+    if (w.ls) parts.push(`letter-spacing:${px(w.ls)}`);
+    if (w.ln && w.k === 't') {
+      // The device's lines, as it drew them. The browser's font is a
+      // little wider or narrower, so a line may overhang its box; a clip
+      // would cut its last letters ("Offic").
+      parts.push('white-space:pre', 'overflow:visible');
+    } else {
+      parts.push('white-space:pre-wrap', 'overflow:hidden', 'word-break:break-word');
+    }
     if (w.k === 'in') {
       parts.push(
         'display:flex',
