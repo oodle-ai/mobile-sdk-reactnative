@@ -8,6 +8,26 @@ final class WireframeWalker {
   private static let privacyPrefix = "oodle-privacy-"
   /// Walks longer than this stop early, to keep frames from dropping.
   private static let timeBudget: CFTimeInterval = 0.04
+  /// A drawing is drawn again at most this often.
+  private static let pictureRefresh: CFTimeInterval = 2
+  /// A larger drawing is a placeholder: its picture would be too big to send.
+  private static let pictureMaxPoints: CGFloat = 640
+  private static let pictureMaxScale: CGFloat = 2
+  /// The last picture of each drawing, so an unchanged one is not drawn
+  /// and encoded on every capture.
+  private static let pictures = NSMapTable<UIView, Picture>.weakToStrongObjects()
+
+  private final class Picture {
+    let key: String
+    let data: String
+    let at: CFTimeInterval
+
+    init(key: String, data: String, at: CFTimeInterval) {
+      self.key = key
+      self.data = data
+      self.at = at
+    }
+  }
 
   private let maxNodes: Int
   private var nodes: [[String: Any]] = []
@@ -80,7 +100,22 @@ final class WireframeWalker {
   private func isLeaf(_ view: UIView) -> Bool {
     if view is UITextField || view is UITextView || view is UISwitch || view is UIImageView { return true }
     let name = NSStringFromClass(type(of: view))
-    return name.contains("WKWebView") || name.contains("Paragraph")
+    return name.contains("WKWebView") || name.contains("Paragraph") || isVector(view)
+  }
+
+  /// A react-native-svg drawing. Its shapes are views of their own, which
+  /// the picture of the drawing already shows.
+  private func isVector(_ view: UIView) -> Bool {
+    NSStringFromClass(type(of: view)) == "RNSVGSvgView"
+  }
+
+  /// Text that is a glyph of an icon font (@expo/vector-icons and the
+  /// like): characters of the Private Use Area, or an emoji. The replay has
+  /// no copy of the font, so the glyph is sent as a picture.
+  static func isIconGlyph(_ text: String) -> Bool {
+    let units = Array(text.utf16)
+    if units.isEmpty || units.count > 4 { return false }
+    return units.allSatisfy { (0xE000...0xF8FF).contains($0) || UTF16.isLeadSurrogate($0) || UTF16.isTrailSurrogate($0) }
   }
 
   /// React Native keeps the `nativeID` prop as `nativeId` (Fabric) or
@@ -124,6 +159,10 @@ final class WireframeWalker {
     }
     if let label = view as? UILabel {
       let text = label.text ?? ""
+      if Self.isIconGlyph(text) {
+        let color = label.textColor.map(css) ?? ""
+        return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: "\(text)|\(color)")
+      }
       if text.isEmpty && bg == nil { return nil }
       var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
       style(&n, bg: bg, radius: radius, view: view)
@@ -136,6 +175,9 @@ final class WireframeWalker {
     }
     if name.contains("Paragraph") {
       return paragraph(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, bg: bg, radius: radius)
+    }
+    if isVector(view) {
+      return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: nil)
     }
     if view is UIImageView || name.contains("ImageComponentView") || name.contains("RCTImageView") {
       var n = box(view, kind: "i", rect: rect, visible: visible, alpha: alpha)
@@ -163,6 +205,10 @@ final class WireframeWalker {
       attributed = view.perform(selector)?.takeUnretainedValue() as? NSAttributedString
     }
     let text = attributed?.string ?? ""
+    if let attributed = attributed, Self.isIconGlyph(text) {
+      let color = (attributed.attributes(at: 0, effectiveRange: nil)[.foregroundColor] as? UIColor).map(css) ?? ""
+      return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: "\(text)|\(color)")
+    }
     if text.isEmpty && bg == nil { return nil }
     var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
     style(&n, bg: bg, radius: radius, view: view)
@@ -178,6 +224,42 @@ final class WireframeWalker {
       )
       if let privacy = privacy { n["pv"] = privacy }
     }
+    return n
+  }
+
+  /// A drawing as a PNG, at most twice its size in points: a
+  /// react-native-svg drawing, or a glyph of an icon font. Drawings and
+  /// icons are the app's own graphics, not user content, so they are
+  /// recorded as they are; a mask or a hidden tag over them still applies.
+  ///
+  /// `content` names what the view draws, when it is known (an icon's
+  /// glyph and color): the picture is then drawn again only when that
+  /// changes. A react-native-svg drawing has no such name and is drawn
+  /// again at most every `pictureRefresh`.
+  private func picture(
+    _ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?, content: String?
+  ) -> [String: Any] {
+    var n = box(view, kind: "v", rect: rect, visible: visible, alpha: alpha)
+    if privacy == "mask" { return n }
+    let size = view.bounds.size
+    if size.width > Self.pictureMaxPoints || size.height > Self.pictureMaxPoints { return n }
+    let key = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))|\(content ?? "")"
+    let now = CACurrentMediaTime()
+    if let cached = Self.pictures.object(forKey: view), cached.key == key,
+       content != nil || now - cached.at < Self.pictureRefresh {
+      n["img"] = cached.data
+      return n
+    }
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = min(view.window?.screen.scale ?? 2, Self.pictureMaxScale)
+    format.opaque = false
+    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+      view.layer.render(in: context.cgContext)
+    }
+    guard let png = image.pngData() else { return n }
+    let data = "data:image/png;base64," + png.base64EncodedString()
+    Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
+    n["img"] = data
     return n
   }
 
