@@ -20,7 +20,6 @@ export const TELEMETRY_BATCH_KEY = 'sdk_telemetry';
 const MAX_BATCH_ITEMS = 50;
 const MAX_BATCH_BYTES = 500_000;
 const MAX_ITEM_BYTES = 256_000;
-const REPLAY_MEASURE_LIMIT = 64_000;
 /** Items held while consent is pending, per batch key. */
 const MAX_HELD_ITEMS = 1000;
 const MAX_IN_FLIGHT = 4;
@@ -167,9 +166,11 @@ function getQueue(key: string): Queue {
 function measure(key: string, item: Payload, hint?: number) {
   if (key === REPLAY_BATCH_KEY) {
     // A full snapshot cannot be split, and the recorder already bounds
-    // segment size, so replay items are never rejected for size.
+    // segment size, so replay items are never rejected for size. They are
+    // measured in full: a capped measure let a "500 KB" batch hold
+    // several megabytes of snapshots.
     return {
-      bytes: hint ?? estimateJsonBytes(item, REPLAY_MEASURE_LIMIT),
+      bytes: hint ?? estimateJsonBytes(item),
       oversized: false,
     };
   }

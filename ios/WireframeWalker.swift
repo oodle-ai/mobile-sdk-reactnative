@@ -15,8 +15,16 @@ final class WireframeWalker {
   /// A walk that takes longer than this, in slices, stops. The screen
   /// keeps changing.
   private static let maxWallTime: CFTimeInterval = 1
-  /// A drawing is drawn again at most this often.
-  private static let pictureRefresh: CFTimeInterval = 2
+  /// A drawing without a known content (react-native-svg) is drawn again
+  /// at most this often. Its content cannot be read, so it is drawn to see.
+  private static let pictureRefresh: CFTimeInterval = 5
+  /// A picture with more pixels than this is encoded on a background
+  /// queue: a large PNG can take tens of ms. A small one (an icon) is
+  /// encoded at once, so it is in the snapshot that first shows it.
+  private static let pictureSyncPixels: CGFloat = 128 * 128
+  private static let encodeQueue = DispatchQueue(label: "ai.oodle.rum.picture", qos: .utility)
+  /// Drawings whose picture is encoded now. Main thread only.
+  private static let encoding = NSHashTable<UIView>.weakObjects()
   /// A larger drawing is a placeholder: its picture would be too big to send.
   private static let pictureMaxPoints: CGFloat = 640
   private static let pictureMaxScale: CGFloat = 2
@@ -400,21 +408,39 @@ final class WireframeWalker {
     if size.width > Self.pictureMaxPoints || size.height > Self.pictureMaxPoints { return n }
     let key = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))|\(content ?? "")"
     let now = CACurrentMediaTime()
-    if let cached = Self.pictures.object(forKey: view), cached.key == key,
-       content != nil || now - cached.at < Self.pictureRefresh {
-      n["img"] = cached.data
+    // While a new picture is encoded, the node keeps the last one.
+    let cached = Self.pictures.object(forKey: view)
+    if let cached = cached { n["img"] = cached.data }
+    if let cached = cached, cached.key == key, content != nil || now - cached.at < Self.pictureRefresh {
       return n
     }
+    if Self.encoding.contains(view) { return n }
     let format = UIGraphicsImageRendererFormat()
     format.scale = min(view.window?.screen.scale ?? 2, Self.pictureMaxScale)
     format.opaque = false
     let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
       view.layer.render(in: context.cgContext)
     }
-    guard let png = image.pngData() else { return n }
-    let data = "data:image/png;base64," + png.base64EncodedString()
-    Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
-    n["img"] = data
+    let pixels = size.width * size.height * format.scale * format.scale
+    if pixels <= Self.pictureSyncPixels {
+      guard let png = image.pngData() else { return n }
+      let data = "data:image/png;base64," + png.base64EncodedString()
+      Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
+      n["img"] = data
+      return n
+    }
+    // The next walk sends it: iOS walks on each capture.
+    Self.encoding.add(view)
+    Self.encodeQueue.async { [weak view] in
+      let data = image.pngData().map { "data:image/png;base64," + $0.base64EncodedString() }
+      DispatchQueue.main.async {
+        guard let view = view else { return }
+        Self.encoding.remove(view)
+        if let data = data {
+          Self.pictures.setObject(Picture(key: key, data: data, at: CACurrentMediaTime()), forKey: view)
+        }
+      }
+    }
     return n
   }
 

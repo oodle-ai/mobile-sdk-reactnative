@@ -3,7 +3,9 @@
  * that plays browser sessions plays mobile sessions without change.
  *
  * Each wireframe becomes one absolutely positioned <div> under <body>, in
- * draw order. The first snapshot is an rrweb full snapshot. Later snapshots
+ * draw order. The picture of a vector drawing is a child <div> of its own,
+ * so a drawing that moves changes only the style of its parent, and the
+ * picture is sent again only when it changes. The first snapshot is an rrweb full snapshot. Later snapshots
  * are compared with the one before and sent as a mutation: removed views,
  * added views, changed styles and changed text.
  */
@@ -116,11 +118,40 @@ interface Rendered {
   kind: WireframeKind;
   style: string;
   text: string | null;
+  /** The picture of a vector drawing, as a PNG data URL. */
+  img: string | null;
 }
 
 interface Tracked extends Rendered {
   rid: number;
   tid: number | null;
+  /** The id of the picture child. */
+  pid: number | null;
+}
+
+const PNG_DATA_URL = 'data:image/png;base64,';
+
+/**
+ * Characters of new pictures in one snapshot or mutation. The pictures
+ * after the budget wait for the next capture, so one event does not carry
+ * megabytes of pictures. One picture is always sent, whatever its size.
+ */
+export const PICTURE_BUDGET_CHARS = 256_000;
+
+/** The picture of a wireframe, and only a PNG data URL. */
+function pictureOf(w: Wireframe): string | null {
+  return w.k === 'v' && typeof w.img === 'string' && w.img.startsWith(PNG_DATA_URL) ? w.img : null;
+}
+
+/** The style of the picture child, which fills its parent. */
+export function pictureStyle(img: string): string {
+  return [
+    'width:100%',
+    'height:100%',
+    `background-image:url(${img})`,
+    'background-size:100% 100%',
+    'background-repeat:no-repeat',
+  ].join(';');
 }
 
 function px(n: number): string {
@@ -181,15 +212,8 @@ export function styleFor(w: Wireframe): string {
       parts.push('background-color:rgba(127,127,127,0.25)');
       break;
     case 'v':
-      if (w.img && w.img.startsWith('data:image/png;base64,')) {
-        parts.push(
-          `background-image:url(${w.img})`,
-          'background-size:100% 100%',
-          'background-repeat:no-repeat',
-        );
-      } else {
-        parts.push('background-color:rgba(127,127,127,0.25)');
-      }
+      // A child draws the picture (pictureStyle); without one, a placeholder.
+      if (!pictureOf(w)) parts.push('background-color:rgba(127,127,127,0.25)');
       break;
     case 'p':
     case 'h':
@@ -262,16 +286,27 @@ export function bodyStyle(width: number, height: number): string {
   ].join(';');
 }
 
-function render(snapshot: WireframeSnapshot, privacy: PrivacyOptions): Rendered[] {
-  const out: Rendered[] = [];
+/** The wireframes that draw, each id once. */
+function drawn(snapshot: WireframeSnapshot): Wireframe[] {
+  const out: Wireframe[] = [];
   const seen = new Set<number>();
   for (const w of snapshot.nodes) {
     if (!w || typeof w.id !== 'number' || seen.has(w.id)) continue;
     if (!(w.w > 0 && w.h > 0)) continue;
     seen.add(w.id);
-    out.push({ nid: w.id, kind: w.k, style: styleFor(w), text: visibleText(w, privacy) });
+    out.push(w);
   }
   return out;
+}
+
+function pictureNode(id: number, img: string): SerializedNode {
+  return {
+    type: NodeType.Element,
+    tagName: 'div',
+    attributes: { style: pictureStyle(img) },
+    childNodes: [],
+    id,
+  };
 }
 
 export interface DiffResult {
@@ -287,8 +322,17 @@ export class WireframeRecorder {
   private width = 0;
   private height = 0;
   private hasFull = false;
+  private deferred = false;
 
   constructor(private privacy: PrivacyOptions) {}
+
+  /**
+   * True when the last snapshot left pictures for later (PICTURE_BUDGET_CHARS).
+   * The next capture must then not skip an unchanged screen.
+   */
+  get hasDeferredPictures(): boolean {
+    return this.deferred;
+  }
 
   setPrivacy(p: PrivacyOptions) {
     this.privacy = p;
@@ -316,9 +360,11 @@ export class WireframeRecorder {
    */
   private serialize(r: Rendered): { node: SerializedNode; children: SerializedNode[]; tracked: Tracked } {
     const rid = this.alloc();
+    const pid = r.img !== null ? this.alloc() : null;
     const tid = r.text !== null ? this.alloc() : null;
-    const children: SerializedNode[] =
-      tid !== null ? [{ type: NodeType.Text, textContent: r.text ?? '', id: tid }] : [];
+    const children: SerializedNode[] = [];
+    if (pid !== null) children.push(pictureNode(pid, r.img ?? ''));
+    if (tid !== null) children.push({ type: NodeType.Text, textContent: r.text ?? '', id: tid });
     const node: SerializedNode = {
       type: NodeType.Element,
       tagName: 'div',
@@ -326,7 +372,7 @@ export class WireframeRecorder {
       childNodes: [],
       id: rid,
     };
-    return { node, children, tracked: { ...r, rid, tid } };
+    return { node, children, tracked: { ...r, rid, tid, pid } };
   }
 
   /**
@@ -345,9 +391,11 @@ export class WireframeRecorder {
     forceFull = false,
   ): DiffResult {
     const partial = snapshot.truncated === true;
-    const rendered = render(snapshot, this.privacy);
+    const nodes = drawn(snapshot);
     const sizeChanged = snapshot.width !== this.width || snapshot.height !== this.height;
-    if (forceFull || !this.hasFull || sizeChanged || this.orderChanged(rendered)) {
+    const full = forceFull || !this.hasFull || sizeChanged || this.orderChanged(nodes);
+    const rendered = this.render(nodes, full);
+    if (full) {
       const events: RRWebEvent[] = [];
       if (this.hasFull && sizeChanged) {
         events.push({
@@ -377,13 +425,37 @@ export class WireframeRecorder {
     };
   }
 
-  private orderChanged(next: Rendered[]): boolean {
-    const nextIds = new Set(next.map((r) => r.nid));
+  /**
+   * Applies the privacy level and the picture budget. A picture over the
+   * budget is left for the next capture: the view keeps the picture it
+   * has in the replay, or none.
+   */
+  private render(nodes: Wireframe[], full: boolean): Rendered[] {
+    let spent = 0;
+    this.deferred = false;
+    return nodes.map((w) => {
+      let img = pictureOf(w);
+      const before = full ? null : (this.tracked.get(w.id)?.img ?? null);
+      if (img !== null && img !== before) {
+        if (spent > 0 && spent + img.length > PICTURE_BUDGET_CHARS) {
+          img = before;
+          this.deferred = true;
+        } else {
+          spent += img.length;
+        }
+      }
+      const shown = img === pictureOf(w) ? w : { ...w, img: img ?? undefined };
+      return { nid: w.id, kind: w.k, style: styleFor(shown), text: visibleText(w, this.privacy), img };
+    });
+  }
+
+  private orderChanged(next: Wireframe[]): boolean {
+    const nextIds = new Set(next.map((w) => w.id));
     const prevCommon = this.order.filter((id) => nextIds.has(id));
     let i = 0;
-    for (const r of next) {
-      if (!this.tracked.has(r.nid)) continue;
-      if (prevCommon[i] !== r.nid) return true;
+    for (const w of next) {
+      if (!this.tracked.has(w.id)) continue;
+      if (prevCommon[i] !== w.id) return true;
       i++;
     }
     return false;
@@ -518,6 +590,23 @@ export class WireframeRecorder {
         t.tid = tid;
       }
       t.text = r.text;
+    }
+
+    for (const r of next) {
+      const t = this.tracked.get(r.nid)!;
+      if (t.img === r.img) continue;
+      if (t.pid !== null && r.img !== null) {
+        attributes.push({ id: t.pid, attributes: { style: pictureStyle(r.img) } });
+      } else if (t.pid !== null) {
+        removes.push({ parentId: t.rid, id: t.pid });
+        t.pid = null;
+      } else if (r.img !== null) {
+        // The picture goes before the text, as in a full snapshot.
+        const pid = this.alloc();
+        adds.push({ parentId: t.rid, nextId: t.tid, node: pictureNode(pid, r.img) });
+        t.pid = pid;
+      }
+      t.img = r.img;
     }
 
     this.order = next.map((r) => r.nid).concat(kept);

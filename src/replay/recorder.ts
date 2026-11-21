@@ -108,7 +108,10 @@ function push(events: RRWebEvent[]) {
     // errors at the wrong place.
     if (offset) e.timestamp += offset;
     segment.push(e);
-    segmentBytes += estimateJsonBytes(e, SEGMENT_MAX_BYTES);
+    // Measured in full: the transport counts these bytes toward its batch
+    // size, and a full snapshot with pictures can be far larger than a
+    // segment.
+    segmentBytes += estimateJsonBytes(e);
   }
   if (segment.length >= SEGMENT_MAX_EVENTS || segmentBytes >= SEGMENT_MAX_BYTES) {
     flushSegment();
@@ -127,8 +130,10 @@ async function capture() {
   try {
     const full = pendingFull || Date.now() - lastFullAt > FULL_SNAPSHOT_EVERY_MS;
     // On an idle screen native code skips the walk, unless a full
-    // snapshot is due, which needs the whole screen.
-    const raw = await native.captureWireframes({ maxNodes: MAX_NODES, skipUnchanged: !full });
+    // snapshot is due, which needs the whole screen, or pictures wait to
+    // be sent.
+    const skipUnchanged = !full && !recorder.hasDeferredPictures;
+    const raw = await native.captureWireframes({ maxNodes: MAX_NODES, skipUnchanged });
     if (!recording || !recorder) return;
     const snapshot = JSON.parse(raw) as WireframeSnapshot & { unchanged?: boolean };
     if (snapshot?.unchanged) return;
