@@ -231,7 +231,8 @@ object WireframeCapture {
       view is TextView -> {
         val text = view.text?.toString() ?: ""
         if (isIconGlyph(text)) {
-          return box(view, "i", rect, visible, w, alpha)
+          val color = view.layout?.let { spanPaint(it).color } ?: view.currentTextColor
+          return vector(view, rect, visible, w, alpha, pv, "$text|$color")
         }
         if (text.isBlank() && !hasPaint(bg, borderWidth)) return null
         val n = box(view, if (text.isBlank()) "s" else "t", rect, visible, w, alpha)
@@ -332,13 +333,17 @@ object WireframeCapture {
       val prepared = getter.invoke(view) ?: return null
       val layout = prepared.javaClass.getMethod("getLayout").invoke(prepared) as Layout
       val text = layout.text?.toString() ?: ""
-      val n = box(view, if (text.isBlank()) "s" else "t", rect, visible, w, alpha)
-      styleBox(n, view, bg, borderWidth, w)
-      if (text.isNotBlank()) {
-        layoutText(n, layout, w)
-        pv?.let { n.put("pv", it) }
+      if (isIconGlyph(text)) {
+        vector(view, rect, visible, w, alpha, pv, "$text|${spanPaint(layout).color}")
+      } else {
+        val n = box(view, if (text.isBlank()) "s" else "t", rect, visible, w, alpha)
+        styleBox(n, view, bg, borderWidth, w)
+        if (text.isNotBlank()) {
+          layoutText(n, layout, w)
+          pv?.let { n.put("pv", it) }
+        }
+        n
       }
-      n
     } catch (_: Throwable) {
       if (hasPaint(bg, borderWidth)) box(view, "s", rect, visible, w, alpha) else null
     }
@@ -358,16 +363,7 @@ object WireframeCapture {
     }
     n.put("tx", lines)
     n.put("ln", true)
-    val paint = TextPaint(layout.paint)
-    if (text is Spanned && text.isNotEmpty()) {
-      for (span in text.getSpans(0, 1, CharacterStyle::class.java)) {
-        try {
-          span.updateDrawState(paint)
-        } catch (_: Throwable) {
-          // A span that cannot apply to a copy keeps the paint as it is.
-        }
-      }
-    }
+    val paint = spanPaint(layout)
     n.put("tc", css(paint.color))
     n.put("fs", round(paint.textSize / w.density))
     val weight = paintWeight(paint)
@@ -379,6 +375,22 @@ object WireframeCapture {
       Layout.Alignment.ALIGN_OPPOSITE -> n.put("ta", "right")
       else -> {}
     }
+  }
+
+  /** The paint of a layout's first character, with its spans applied. */
+  private fun spanPaint(layout: Layout): TextPaint {
+    val paint = TextPaint(layout.paint)
+    val text = layout.text
+    if (text is Spanned && text.isNotEmpty()) {
+      for (span in text.getSpans(0, 1, CharacterStyle::class.java)) {
+        try {
+          span.updateDrawState(paint)
+        } catch (_: Throwable) {
+          // A span that cannot apply to a copy keeps the paint as it is.
+        }
+      }
+    }
+    return paint
   }
 
   private fun paintWeight(paint: TextPaint): Int {
@@ -402,21 +414,35 @@ object WireframeCapture {
   private const val VECTOR_MAX_SCALE = 2f
 
   /**
-   * A react-native-svg drawing as a PNG, at most twice its size in dp.
-   * Drawings are the app's own graphics (illustrations, icons), not user
-   * content, so they are recorded as they are, as the reference SDK records them;
-   * a mask or a hidden tag over them still applies.
+   * A drawing as a PNG, at most twice its size in dp: a react-native-svg
+   * drawing, or a glyph of an icon font (@expo/vector-icons and the like),
+   * which the replay could not draw without the font. Drawings and icons
+   * are the app's own graphics, not user content, so they are recorded as
+   * they are; a mask or a hidden tag over them still applies.
+   *
+   * content names what the view draws, when it is known (an icon's glyph
+   * and color): the picture is then drawn again only when that changes.
+   * A react-native-svg drawing has no such name and is drawn again at most
+   * every VECTOR_REFRESH_MS.
    */
-  private fun vector(view: View, rect: RectF, visible: RectF, w: Walk, alpha: Float, pv: String?): JSONObject {
+  private fun vector(
+    view: View,
+    rect: RectF,
+    visible: RectF,
+    w: Walk,
+    alpha: Float,
+    pv: String?,
+    content: String? = null,
+  ): JSONObject {
     val n = box(view, "v", rect, visible, w, alpha)
     if (pv == "mask") return n
     val wDp = view.width / w.density
     val hDp = view.height / w.density
     if (wDp > VECTOR_MAX_DP || hDp > VECTOR_MAX_DP) return n
-    val key = "${view.width}x${view.height}"
+    val key = "${view.width}x${view.height}|${content ?: ""}"
     val now = SystemClock.uptimeMillis()
     val cached = pictures[view]
-    if (cached != null && cached.key == key && now - cached.at < VECTOR_REFRESH_MS) {
+    if (cached != null && cached.key == key && (content != null || now - cached.at < VECTOR_REFRESH_MS)) {
       n.put("img", cached.data)
       return n
     }
