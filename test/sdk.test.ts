@@ -464,6 +464,23 @@ describe('OodleRum end to end', () => {
     expect(events('action').find((a) => a.action_name === 'after replay')!.replay_id).toBe(sdk.OodleRum.getSessionId());
   });
 
+  // A list can still move after a drag; a capture then costs frames.
+  it('captures again after a tap, and not after a drag', async () => {
+    await settle(2000);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchMove(100, 260);
+    recorder.recordTouchEnd(100, 320, false);
+    await vi.advanceTimersByTimeAsync(700);
+    // At most the capture loop's own capture.
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeLessThanOrEqual(1);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchEnd(102, 201, true);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it('pairs background and foreground, ends the view and saves the outbox', async () => {
     rnStub.emitAppState('background');
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background']);

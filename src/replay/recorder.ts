@@ -33,6 +33,13 @@ const SEGMENT_MAX_EVENTS = 200;
 const SEGMENT_MAX_BYTES = 60_000;
 const SEGMENT_MAX_AGE_MS = 5000;
 const TOUCH_MOVE_THROTTLE_MS = 50;
+/**
+ * A touch that moves further than this (dp) is a drag or a scroll. Its
+ * follow-up captures are skipped: a list can still move after the finger
+ * lifts, and each capture during that motion costs main thread time when
+ * frames matter most. The capture loop records where the motion ends.
+ */
+const DRAG_SLOP_DP = 10;
 const MAX_NODES = 2000;
 
 let recorder: WireframeRecorder | null = null;
@@ -50,6 +57,8 @@ let segmentTimer: ReturnType<typeof setTimeout> | null = null;
 let segmentSessionId = '';
 let flushedSessionId = '';
 let lastTouchMove = 0;
+let touchStart: { x: number; y: number } | null = null;
+let dragging = false;
 
 function eligible(): boolean {
   const c = getConfig();
@@ -239,7 +248,14 @@ function touchAllowed(): boolean {
   return recording && getConfig()?.replay.touchPrivacy !== 'hide';
 }
 
+function trackDrag(x: number, y: number) {
+  if (!touchStart || dragging) return;
+  if (Math.abs(x - touchStart.x) > DRAG_SLOP_DP || Math.abs(y - touchStart.y) > DRAG_SLOP_DP) dragging = true;
+}
+
 export function recordTouchStart(x: number, y: number) {
+  touchStart = { x, y };
+  dragging = false;
   if (!touchAllowed()) return;
   push([
     {
@@ -251,6 +267,7 @@ export function recordTouchStart(x: number, y: number) {
 }
 
 export function recordTouchMove(x: number, y: number) {
+  trackDrag(x, y);
   if (!touchAllowed()) return;
   const now = Date.now();
   if (now - lastTouchMove < TOUCH_MOVE_THROTTLE_MS) return;
@@ -265,7 +282,11 @@ export function recordTouchMove(x: number, y: number) {
 }
 
 export function recordTouchEnd(x: number, y: number, tap: boolean) {
-  if (recording) scheduleFollowUps();
+  trackDrag(x, y);
+  const dragged = dragging;
+  touchStart = null;
+  dragging = false;
+  if (recording && !dragged) scheduleFollowUps();
   if (!touchAllowed()) return;
   const now = Date.now();
   const events: RRWebEvent[] = [
@@ -307,4 +328,6 @@ export function resetReplay() {
   segmentSessionId = '';
   flushedSessionId = '';
   lastTouchMove = 0;
+  touchStart = null;
+  dragging = false;
 }

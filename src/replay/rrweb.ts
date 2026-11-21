@@ -60,6 +60,11 @@ export interface WireframeSnapshot {
   width: number;
   height: number;
   nodes: Wireframe[];
+  /**
+   * The walk stopped early (its time budget or the node limit), so the
+   * views after the last node are missing, not removed.
+   */
+  truncated?: boolean;
 }
 
 // rrweb constants (rrweb 2.x, @rrweb/types).
@@ -328,6 +333,10 @@ export class WireframeRecorder {
    * Returns the events for this snapshot: a Meta event and a full snapshot
    * when `forceFull` is set, nothing is recorded yet, or the screen size or
    * draw order changed; otherwise one mutation, or none when nothing changed.
+   *
+   * A truncated snapshot holds the first views in draw order only. Views
+   * that it does not reach stay as they are: they are not removed, or the
+   * replay would show them gone and back again on the next snapshot.
    */
   apply(
     snapshot: WireframeSnapshot,
@@ -335,6 +344,7 @@ export class WireframeRecorder {
     href: string,
     forceFull = false,
   ): DiffResult {
+    const partial = snapshot.truncated === true;
     const rendered = render(snapshot, this.privacy);
     const sizeChanged = snapshot.width !== this.width || snapshot.height !== this.height;
     if (forceFull || !this.hasFull || sizeChanged || this.orderChanged(rendered)) {
@@ -353,7 +363,7 @@ export class WireframeRecorder {
       events.push(...this.full(snapshot, rendered, timestamp, href));
       return { full: true, events };
     }
-    const mutation = this.diff(rendered);
+    const mutation = this.diff(rendered, partial);
     if (!mutation) return { full: false, events: [] };
     return {
       full: false,
@@ -435,19 +445,36 @@ export class WireframeRecorder {
     ];
   }
 
-  private diff(next: Rendered[]): Record<string, unknown[]> | null {
+  private diff(next: Rendered[], partial: boolean): Record<string, unknown[]> | null {
     const removes: Array<{ parentId: number; id: number }> = [];
     const adds: Array<{ parentId: number; nextId: number | null; node: SerializedNode }> = [];
     const attributes: Array<{ id: number; attributes: Record<string, string> }> = [];
     const texts: Array<{ id: number; value: string }> = [];
 
     const nextIds = new Set(next.map((r) => r.nid));
-    for (const id of this.order) {
-      if (nextIds.has(id)) continue;
+    // A truncated walk reached the views up to the last one it shares
+    // with the screen before. A view before that one that it did not
+    // find is gone. Views after it were not reached, and are kept.
+    let reached = this.order.length - 1;
+    if (partial) {
+      reached = -1;
+      this.order.forEach((id, i) => {
+        if (nextIds.has(id)) reached = i;
+      });
+    }
+    const kept: number[] = [];
+    this.order.forEach((id, i) => {
+      if (nextIds.has(id)) return;
+      if (i > reached) {
+        kept.push(id);
+        return;
+      }
       const t = this.tracked.get(id)!;
       removes.push({ parentId: BODY_ID, id: t.rid });
       this.tracked.delete(id);
-    }
+    });
+    // Kept views are after all views of this snapshot in the DOM.
+    const firstKept = kept.length > 0 ? this.tracked.get(kept[0])!.rid : null;
 
     // A view whose kind changed is replaced, not edited.
     for (const r of next) {
@@ -464,7 +491,7 @@ export class WireframeRecorder {
       if (this.tracked.has(r.nid)) continue;
       const following = i + 1 < next.length ? this.tracked.get(next[i + 1].nid) : undefined;
       const { node, children, tracked } = this.serialize(r);
-      adds.push({ parentId: BODY_ID, nextId: following ? following.rid : null, node });
+      adds.push({ parentId: BODY_ID, nextId: following ? following.rid : firstKept, node });
       for (const child of children) adds.push({ parentId: tracked.rid, nextId: null, node: child });
       this.tracked.set(r.nid, tracked);
     }
@@ -493,7 +520,7 @@ export class WireframeRecorder {
       t.text = r.text;
     }
 
-    this.order = next.map((r) => r.nid);
+    this.order = next.map((r) => r.nid).concat(kept);
     if (!removes.length && !adds.length && !attributes.length && !texts.length) return null;
     return { texts, attributes, removes, adds };
   }

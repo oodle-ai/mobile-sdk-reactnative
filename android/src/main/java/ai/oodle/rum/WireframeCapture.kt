@@ -8,6 +8,8 @@ import android.graphics.RectF
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
 import android.text.Layout
@@ -35,7 +37,9 @@ import com.facebook.react.uimanager.style.LogicalEdge
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
+import java.lang.reflect.Method
 import java.util.WeakHashMap
+import java.util.concurrent.Executors
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -48,21 +52,48 @@ import kotlin.math.roundToInt
  */
 object WireframeCapture {
   private const val PRIVACY_PREFIX = "oodle-privacy-"
-  /** Walks longer than this stop early, to keep frames from dropping. */
-  private const val TIME_BUDGET_MS = 40L
+  /**
+   * Main thread time of one slice of a walk. The walk gives the main
+   * thread back between slices, so frames can draw while it goes on.
+   */
+  private const val SLICE_MS = 4L
+  /** Main thread time of all slices of one walk. A longer walk stops ("truncated"). */
+  private const val WALK_BUDGET_MS = 40L
+  /** A walk that takes longer than this, in slices, stops. The screen keeps changing. */
+  private const val WALK_MAX_WALL_MS = 1_000L
   private const val UNCHANGED = "{\"unchanged\":true}"
+
+  private val main = Handler(Looper.getMainLooper())
+  /** Serializes walk results off the main thread. */
+  private val worker =
+    Executors.newSingleThreadExecutor { r ->
+      Thread(r, "oodle-rum-replay").apply {
+        isDaemon = true
+        priority = Thread.MIN_PRIORITY
+      }
+    }
+
+  /** A view still to visit, with what its parents give it. */
+  private class Item(val view: View, val clip: RectF, val alpha: Float, val privacy: String?)
 
   private class Walk(
     val density: Float,
     val baseX: Int,
     val baseY: Int,
     val maxNodes: Int,
-    val deadline: Long,
+    val startedAt: Long,
   ) {
     val nodes = JSONArray()
     var truncated = false
     val loc = IntArray(2)
+    /** Views to visit, last on top. Children go on in reverse, so the walk is in draw order. */
+    val stack = ArrayDeque<Item>()
+    /** Main thread time of the slices so far. */
+    var spentMs = 0L
   }
+
+  /** True while a walk runs. Main thread only. */
+  private var busy = false
 
   /**
    * Draw passes of the tracked windows. When no window drew since the last
@@ -86,54 +117,108 @@ object WireframeCapture {
     }
   }
 
-  fun capture(activity: Activity?, options: JSONObject): String {
+  /**
+   * Starts a walk on the main thread. The walk runs in slices of SLICE_MS
+   * on the main thread, and the result is serialized on a worker thread.
+   * `resolve` or `reject` is called once, on any thread.
+   */
+  fun capture(activity: Activity?, options: JSONObject, resolve: (String) -> Unit, reject: (Throwable) -> Unit) {
+    if (busy) {
+      // The JS side waits for each walk; this is only a guard.
+      resolve(UNCHANGED)
+      return
+    }
     val roots = rootViews(activity)
     val base = activity?.window?.decorView ?: roots.firstOrNull()
-    val out = JSONObject()
     if (base == null || base.width == 0) {
       lastSignature = null
-      out.put("width", 0).put("height", 0).put("nodes", JSONArray())
-      return out.toString()
+      resolve(JSONObject().put("width", 0).put("height", 0).put("nodes", JSONArray()).toString())
+      return
     }
     track(roots)
     val signature =
       roots.joinToString(",") { System.identityHashCode(it).toString() } +
         "|${base.width}x${base.height}|$drawTick"
     if (options.optBoolean("skipUnchanged", false) && signature == lastSignature) {
-      return UNCHANGED
+      resolve(UNCHANGED)
+      return
     }
     lastSignature = signature
     val density = base.resources.displayMetrics.density
     val baseLoc = IntArray(2)
     base.getLocationOnScreen(baseLoc)
-    val walk =
-      Walk(
-        density,
-        baseLoc[0],
-        baseLoc[1],
-        options.optInt("maxNodes", 2000),
-        SystemClock.uptimeMillis() + TIME_BUDGET_MS,
-      )
+    val walk = Walk(density, baseLoc[0], baseLoc[1], options.optInt("maxNodes", 2000), SystemClock.uptimeMillis())
     val screen = RectF(0f, 0f, base.width.toFloat(), base.height.toFloat())
-    for (root in roots) walk(root, walk, screen, 1f, null)
-    out.put("width", round(base.width / density))
-    out.put("height", round(base.height / density))
-    out.put("nodes", walk.nodes)
-    if (walk.truncated) out.put("truncated", true)
-    return out.toString()
+    for (root in roots.asReversed()) walk.stack.addLast(Item(root, screen, 1f, null))
+    val width = round(base.width / density)
+    val height = round(base.height / density)
+    busy = true
+    step(walk, width, height, resolve, reject)
+  }
+
+  private fun step(w: Walk, width: Double, height: Double, resolve: (String) -> Unit, reject: (Throwable) -> Unit) {
+    try {
+      val sliceStart = SystemClock.uptimeMillis()
+      while (w.stack.isNotEmpty()) {
+        val now = SystemClock.uptimeMillis()
+        if (w.nodes.length() >= w.maxNodes ||
+          w.spentMs + (now - sliceStart) > WALK_BUDGET_MS ||
+          now - w.startedAt > WALK_MAX_WALL_MS
+        ) {
+          w.truncated = true
+          break
+        }
+        if (now - sliceStart >= SLICE_MS) {
+          w.spentMs += now - sliceStart
+          main.post { step(w, width, height, resolve, reject) }
+          return
+        }
+        visit(w.stack.removeLast(), w)
+      }
+      busy = false
+      val out = JSONObject()
+      out.put("width", width)
+      out.put("height", height)
+      out.put("nodes", w.nodes)
+      if (w.truncated) out.put("truncated", true)
+      worker.execute {
+        val text =
+          try {
+            out.toString()
+          } catch (t: Throwable) {
+            reject(t)
+            return@execute
+          }
+        resolve(text)
+      }
+    } catch (t: Throwable) {
+      busy = false
+      lastSignature = null
+      reject(t)
+    }
   }
 
   /**
    * The activity window plus any dialog windows (React Native's Modal is a
    * dialog), in the order they were added, which is back to front.
    */
-  @Suppress("UNCHECKED_CAST")
-  private fun rootViews(activity: Activity?): List<View> {
-    val decor = activity?.window?.decorView
+  /** WindowManagerGlobal and its list of window views, found once. */
+  private val windowViews: Pair<Any, java.lang.reflect.Field>? by lazy {
     try {
       val wmg = Class.forName("android.view.WindowManagerGlobal")
       val instance = wmg.getMethod("getInstance").invoke(null)
       val field = wmg.getDeclaredField("mViews").apply { isAccessible = true }
+      if (instance != null) Pair(instance, field) else null
+    } catch (_: Throwable) {
+      null
+    }
+  }
+
+  @Suppress("UNCHECKED_CAST")
+  private fun rootViews(activity: Activity?): List<View> {
+    val decor = activity?.window?.decorView
+    try {
+      val (instance, field) = windowViews ?: return listOfNotNull(decor)
       val views = ArrayList(field.get(instance) as List<View>)
       val visible = views.filter { it.isAttachedToWindow && it.windowVisibility == View.VISIBLE && it.width > 0 }
       if (visible.isNotEmpty() && (decor == null || visible.contains(decor))) return visible
@@ -143,22 +228,21 @@ object WireframeCapture {
     return listOfNotNull(decor)
   }
 
-  private fun walk(view: View, w: Walk, clip: RectF, parentAlpha: Float, privacy: String?) {
-    if (w.nodes.length() >= w.maxNodes || SystemClock.uptimeMillis() > w.deadline) {
-      w.truncated = true
-      return
-    }
+  private fun visit(item: Item, w: Walk) {
+    val view = item.view
+    // The walk runs in slices: a view can leave the screen between them.
+    if (!view.isAttachedToWindow) return
     if (view.visibility != View.VISIBLE || view.width == 0 || view.height == 0) return
-    val alpha = parentAlpha * view.alpha
+    val alpha = item.alpha * view.alpha
     if (alpha <= 0.01f) return
     view.getLocationOnScreen(w.loc)
     val x = (w.loc[0] - w.baseX).toFloat()
     val y = (w.loc[1] - w.baseY).toFloat()
     val rect = RectF(x, y, x + view.width * view.scaleX, y + view.height * view.scaleY)
     val visible = RectF(rect)
-    if (!visible.intersect(clip)) return
+    if (!visible.intersect(item.clip)) return
 
-    var pv = privacy
+    var pv = item.privacy
     val nativeId = nativeId(view)
     if (nativeId != null && nativeId.startsWith(PRIVACY_PREFIX)) {
       when (nativeId.substring(PRIVACY_PREFIX.length)) {
@@ -174,12 +258,52 @@ object WireframeCapture {
     describe(view, rect, visible, w, alpha, pv)?.let { w.nodes.put(it) }
 
     if (view is ViewGroup && !isLeaf(view)) {
-      val childClip = if (clipsChildren(view)) visible else clip
-      for (i in 0 until view.childCount) {
-        walk(view.getChildAt(i), w, childClip, alpha, pv)
+      val childClip = if (clipsChildren(view)) visible else item.clip
+      for (i in view.childCount - 1 downTo 0) {
+        val child = view.getChildAt(i) ?: continue
+        w.stack.addLast(Item(child, childClip, alpha, pv))
       }
     }
   }
+
+  /**
+   * What the walk needs to know about a view class, found once per class.
+   * Reflection on each view of each walk was a large part of its time, and
+   * getMethod throws for every class without the method.
+   */
+  private class ClassInfo(cls: Class<*>) {
+    val name: String = cls.name
+    /** A react-native-svg drawing (see isVector). */
+    val vector = name == "com.horcrux.svg.SvgView"
+    val scroll = name.contains("ScrollView")
+    val preparedText = cls.simpleName == "PreparedLayoutTextView"
+    val switch = name.contains("Switch", ignoreCase = true)
+    /** React Native's getOverflow(), or null when the class has none. */
+    val overflow: Method? =
+      try {
+        cls.getMethod("getOverflow")
+      } catch (_: Throwable) {
+        null
+      }
+    /** The getter of a PreparedLayoutTextView's prepared layout. */
+    val preparedLayout: Method? =
+      if (!preparedText) {
+        null
+      } else {
+        try {
+          cls.methods.firstOrNull { it.name.startsWith("getPreparedLayout") && it.parameterCount == 0 }
+        } catch (_: Throwable) {
+          null
+        }
+      }
+  }
+
+  /** Main thread only. Classes stay loaded, so the cache does not grow without end. */
+  private val classes = HashMap<Class<*>, ClassInfo>()
+  /** getLayout() of each prepared layout class. */
+  private val layoutGetters = HashMap<Class<*>, Method?>()
+
+  private fun info(view: View): ClassInfo = classes.getOrPut(view.javaClass) { ClassInfo(view.javaClass) }
 
   private fun isLeaf(view: ViewGroup): Boolean = view is WebView || isVector(view)
 
@@ -187,7 +311,7 @@ object WireframeCapture {
    * A react-native-svg drawing. Its shapes are views of their own, but the
    * SvgView draws them all, so it is captured as one picture.
    */
-  private fun isVector(view: View): Boolean = view.javaClass.name == "com.horcrux.svg.SvgView"
+  private fun isVector(view: View): Boolean = info(view).vector
 
   private fun nativeId(view: View): String? =
     try {
@@ -198,11 +322,13 @@ object WireframeCapture {
 
   private fun clipsChildren(view: ViewGroup): Boolean {
     if (view is ScrollView || view is HorizontalScrollView) return true
-    if (view.javaClass.name.contains("ScrollView")) return true
+    val info = info(view)
+    if (info.scroll) return true
     if (view.clipChildren) return true
     // React Native views keep clipChildren off and clip for overflow: hidden.
+    val getter = info.overflow ?: return false
     return try {
-      val overflow = view.javaClass.getMethod("getOverflow").invoke(view)
+      val overflow = getter.invoke(view)
       overflow != null && overflow.toString().lowercase().let { it.contains("hidden") || it.contains("scroll") }
     } catch (_: Throwable) {
       false
@@ -249,7 +375,7 @@ object WireframeCapture {
         }
         n
       }
-      view.javaClass.simpleName == "PreparedLayoutTextView" -> preparedLayoutText(view, rect, visible, w, alpha, pv, bg, borderWidth)
+      info(view).preparedText -> preparedLayoutText(view, rect, visible, w, alpha, pv, bg, borderWidth)
       isVector(view) -> vector(view, rect, visible, w, alpha, pv)
       view is ImageView -> box(view, "i", rect, visible, w, alpha).also { styleBox(it, view, null, 0f, w) }
       view is WebView -> box(view, "wv", rect, visible, w, alpha)
@@ -259,7 +385,7 @@ object WireframeCapture {
     }
   }
 
-  private fun isSwitch(view: CompoundButton): Boolean = view.javaClass.name.contains("Switch", ignoreCase = true)
+  private fun isSwitch(view: CompoundButton): Boolean = info(view).switch
 
   private fun hasPaint(bg: Int?, borderWidth: Float): Boolean = (bg != null && Color.alpha(bg) > 0) || borderWidth > 0f
 
@@ -329,9 +455,17 @@ object WireframeCapture {
     borderWidth: Float,
   ): JSONObject? =
     try {
-      val getter = view.javaClass.methods.first { it.name.startsWith("getPreparedLayout") && it.parameterCount == 0 }
+      val getter = info(view).preparedLayout ?: throw NoSuchMethodException("getPreparedLayout")
       val prepared = getter.invoke(view) ?: return null
-      val layout = prepared.javaClass.getMethod("getLayout").invoke(prepared) as Layout
+      val layoutGetter =
+        layoutGetters.getOrPut(prepared.javaClass) {
+          try {
+            prepared.javaClass.getMethod("getLayout")
+          } catch (_: Throwable) {
+            null
+          }
+        } ?: throw NoSuchMethodException("getLayout")
+      val layout = layoutGetter.invoke(prepared) as Layout
       val text = layout.text?.toString() ?: ""
       if (isIconGlyph(text)) {
         vector(view, rect, visible, w, alpha, pv, "$text|${spanPaint(layout).color}")
@@ -529,9 +663,23 @@ object WireframeCapture {
     return 0f
   }
 
-  /** ARGB int to CSS #rrggbbaa. */
-  private fun css(color: Int): String =
-    String.format("#%02x%02x%02x%02x", Color.red(color), Color.green(color), Color.blue(color), Color.alpha(color))
+  private val HEX = "0123456789abcdef".toCharArray()
+
+  /** ARGB int to CSS #rrggbbaa. String.format was slow for a call per color. */
+  private fun css(color: Int): String {
+    val out = CharArray(9)
+    out[0] = '#'
+    hex(out, 1, Color.red(color))
+    hex(out, 3, Color.green(color))
+    hex(out, 5, Color.blue(color))
+    hex(out, 7, Color.alpha(color))
+    return String(out)
+  }
+
+  private fun hex(out: CharArray, at: Int, byte: Int) {
+    out[at] = HEX[(byte shr 4) and 0xF]
+    out[at + 1] = HEX[byte and 0xF]
+  }
 
   private fun round(v: Float): Double = Math.round(v * 10.0) / 10.0
 }

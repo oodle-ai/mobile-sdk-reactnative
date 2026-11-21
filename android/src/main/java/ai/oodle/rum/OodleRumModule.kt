@@ -75,10 +75,11 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
   override fun captureWireframes(optionsJson: String, promise: Promise) {
     val options = safe(JSONObject()) { JSONObject(optionsJson) }
     UiThreadUtil.runOnUiThread {
+      val reject = { t: Throwable -> promise.reject("capture_failed", t.message ?: t.javaClass.name, t) }
       try {
-        promise.resolve(WireframeCapture.capture(reactApplicationContext.currentActivity, options))
+        WireframeCapture.capture(reactApplicationContext.currentActivity, options, { promise.resolve(it) }, reject)
       } catch (t: Throwable) {
-        promise.reject("capture_failed", t.message ?: t.javaClass.name, t)
+        reject(t)
       }
     }
   }

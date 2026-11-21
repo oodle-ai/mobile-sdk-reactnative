@@ -134,6 +134,35 @@ describe('WireframeRecorder', () => {
     expect(replayed).toBe(normalize(play(fullOnly([root, header, row, title]))));
   });
 
+  // A walk that ran out of time returns the first views in draw order only.
+  it('keeps the views a truncated walk did not reach', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const added: Wireframe = { id: 11, k: 't', x: 16, y: 70, w: 100, h: 20, tx: 'Added' };
+    const steps: WireframeSnapshot[] = [
+      snap([root, header, title, input, image]),
+      // Changed views at the start; the rest was not reached.
+      { ...snap([root, { ...header, bg: '#000000ff' }]), truncated: true },
+      // A new view before the views that were not reached.
+      { ...snap([root, header, added]), truncated: true },
+      // The walk reached the input: the title before it is gone. The
+      // image after it was not reached.
+      { ...snap([root, header, added, { ...input, x: 20 }]), truncated: true },
+    ];
+    const events: RRWebEvent[] = [];
+    steps.forEach((s, i) => events.push(...r.apply(s, 1000 + i * 1000, 'h').events));
+    expect(events.filter((e) => e.type === EventType.FullSnapshot)).toHaveLength(1);
+    const mutations = events.filter((e) => e.type === EventType.IncrementalSnapshot);
+    const removes = mutations.map((e) => (e.data as { removes: unknown[] }).removes.length);
+    // Only the title is removed, by the last snapshot.
+    expect(removes).toEqual([0, 0, 1]);
+    const replayed = normalize(play(events));
+    const expected = normalize(play(fullOnly([root, header, added, { ...input, x: 20 }, image])));
+    expect(replayed).toBe(expected);
+    // A full walk removes what it does not find.
+    const out = r.apply(snap([root, header]), 5000, 'h');
+    expect((out.events[0].data as { removes: unknown[] }).removes).toHaveLength(3);
+  });
+
   it('takes a new full snapshot when the screen is resized or reordered', () => {
     const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
     r.apply(snap([root, header, title]), 1000, 'h');
