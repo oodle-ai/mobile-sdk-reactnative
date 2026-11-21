@@ -64,9 +64,13 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
 
   override fun startWatchdog(thresholdMs: Double): Boolean = safe(false) { Watchdog.start(thresholdMs.toLong()) }
 
+  override fun stopWatchdog(): Boolean = safe(false) { Watchdog.stop() }
+
   override fun drainNativeEvents(): String = safe("[]") { NativeEvents.drain() }
 
   override fun startVitals(): Boolean = safe(false) { Vitals.start(reactApplicationContext) }
+
+  override fun stopVitals(): Boolean = safe(false) { Vitals.stop() }
 
   override fun collectVitals(): String = safe("{}") { Vitals.collect() }
 

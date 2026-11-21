@@ -5,19 +5,26 @@ import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
 import org.json.JSONObject
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * Posts a task to the main thread and waits for it to run. A main thread
  * that does not run it within the threshold is an ANR. The main thread
  * stack is taken while it is still blocked, because afterwards it shows
  * only where the thread is now.
+ *
+ * The thread waits, and does not wake, while the app is in the background
+ * or the session is not sampled (stop()).
  */
 object Watchdog {
-  private const val POLL_MS = 100L
   private const val PAUSE_MS = 500L
   private const val MAX_STACK_FRAMES = 60
-  @Volatile private var thread: Thread? = null
+  private val gate = Object()
+  private var thread: Thread? = null
+  @Volatile private var thresholdMs = 5000L
+  /** start() was called and stop() was not called after it. */
+  @Volatile private var enabled = false
   /**
    * The system does not show an ANR for a stall in the background, and
    * the main thread of a background app can wait for the system on
@@ -31,30 +38,44 @@ object Watchdog {
 
   fun resume() {
     foreground = true
+    wake()
+  }
+
+  /** The session is not sampled: its stalls would not be sent. */
+  fun stop(): Boolean {
+    enabled = false
+    return true
+  }
+
+  private fun wake() {
+    synchronized(gate) { gate.notifyAll() }
   }
 
   @Synchronized
-  fun start(thresholdMs: Long): Boolean {
+  fun start(threshold: Long): Boolean {
+    thresholdMs = if (threshold > 0) threshold else 5000L
+    enabled = true
+    wake()
     if (thread != null) return true
-    val threshold = if (thresholdMs > 0) thresholdMs else 5000L
     val main = Handler(Looper.getMainLooper())
     val t =
       Thread({
         try {
           while (true) {
-            val ran = AtomicBoolean(false)
-            val postedAt = SystemClock.uptimeMillis()
-            main.post { ran.set(true) }
-            var stack: String? = null
-            while (!ran.get()) {
-              Thread.sleep(POLL_MS)
-              val blocked = SystemClock.uptimeMillis() - postedAt
-              // A paused debugger blocks the main thread on purpose.
-              if (stack == null && blocked >= threshold && !Debug.isDebuggerConnected()) {
-                stack = mainStack()
-              }
+            synchronized(gate) {
+              while (!(enabled && foreground)) gate.wait()
             }
-            if (stack != null && foreground) {
+            val ran = CountDownLatch(1)
+            val postedAt = SystemClock.uptimeMillis()
+            main.post { ran.countDown() }
+            var stack: String? = null
+            // One wait to the threshold, not a poll every 100 ms.
+            if (!ran.await(thresholdMs, TimeUnit.MILLISECONDS)) {
+              // A paused debugger blocks the main thread on purpose.
+              if (!Debug.isDebuggerConnected()) stack = mainStack()
+              ran.await()
+            }
+            if (stack != null && foreground && enabled) {
               val blocked = SystemClock.uptimeMillis() - postedAt
               val e = JSONObject()
               e.put("type", "anr")

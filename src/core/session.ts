@@ -146,6 +146,17 @@ export function peekSession(): SessionData | null {
   return current;
 }
 
+/**
+ * False only when the live session is known and not sampled. With no
+ * session, or one that has ended, the next event rolls a new one, and the
+ * renew listeners hear of it.
+ */
+export function isSessionSampled(): boolean {
+  const s = peekSession();
+  if (!s || isSessionExpired()) return true;
+  return s.sampled;
+}
+
 /** True when the stored session would be replaced by the next event. */
 export function isSessionExpired(now = Date.now()): boolean {
   const s = peekSession();

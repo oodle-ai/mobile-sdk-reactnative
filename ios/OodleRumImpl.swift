@@ -230,11 +230,21 @@ public final class OodleRumImpl: NSObject {
   @objc public func startWatchdog(_ thresholdMs: Double) -> Bool {
     lock.lock()
     defer { lock.unlock() }
-    if watchdog == nil {
+    if let w = watchdog {
+      w.setEnabled(true)
+    } else {
       let w = HangWatchdog(thresholdMs: thresholdMs > 0 ? thresholdMs : 2000, events: events)
       w.start()
       watchdog = w
     }
+    return true
+  }
+
+  /// The session is not sampled: its hangs would not be sent.
+  @objc public func stopWatchdog() -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    watchdog?.setEnabled(false)
     return true
   }
 
@@ -244,6 +254,11 @@ public final class OodleRumImpl: NSObject {
 
   @objc public func startVitals() -> Bool {
     vitals.start()
+    return true
+  }
+
+  @objc public func stopVitals() -> Bool {
+    vitals.stop()
     return true
   }
 
@@ -366,15 +381,45 @@ final class NativeEventQueue {
 // MARK: - Hang watchdog
 
 /// Sends a block to the main queue and waits for it to run. A main thread
-/// that does not run it within the threshold is a hang.
+/// that does not run it within the threshold is a hang. The thread waits,
+/// and does not wake, while the app is in the background or the session is
+/// not sampled.
 final class HangWatchdog {
   private let thresholdMs: Double
   private let events: NativeEventQueue
   private var thread: Thread?
+  private let condition = NSCondition()
+  /// Guarded by `condition`.
+  private var enabled = true
+  private var foreground = true
 
   init(thresholdMs: Double, events: NativeEventQueue) {
     self.thresholdMs = thresholdMs
     self.events = events
+    let center = NotificationCenter.default
+    center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: nil) { [weak self] _ in
+      self?.update { $0.foreground = false }
+    }
+    center.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: nil) { [weak self] _ in
+      self?.update { $0.foreground = true }
+    }
+  }
+
+  func setEnabled(_ on: Bool) {
+    update { $0.enabled = on }
+  }
+
+  private func update(_ change: (HangWatchdog) -> Void) {
+    condition.lock()
+    change(self)
+    condition.signal()
+    condition.unlock()
+  }
+
+  private var active: Bool {
+    condition.lock()
+    defer { condition.unlock() }
+    return enabled && foreground
   }
 
   func start() {
@@ -387,6 +432,9 @@ final class HangWatchdog {
 
   private func run() {
     while true {
+      condition.lock()
+      while !(enabled && foreground) { condition.wait() }
+      condition.unlock()
       let semaphore = DispatchSemaphore(value: 0)
       let postedAt = CACurrentMediaTime()
       DispatchQueue.main.async { semaphore.signal() }
@@ -394,11 +442,14 @@ final class HangWatchdog {
         // Still blocked: wait for the end so the event has the full duration.
         semaphore.wait()
         let blockedMs = (CACurrentMediaTime() - postedAt) * 1000
-        events.add([
-          "type": "app_hang",
-          "timestamp": OodleRumImpl.nowMs() - Int64(blockedMs),
-          "duration_ms": Int64(blockedMs),
-        ])
+        // A stall in the background is the system's, not a hang the user saw.
+        if active {
+          events.add([
+            "type": "app_hang",
+            "timestamp": OodleRumImpl.nowMs() - Int64(blockedMs),
+            "duration_ms": Int64(blockedMs),
+          ])
+        }
       }
       Thread.sleep(forTimeInterval: 0.5)
     }
@@ -428,33 +479,73 @@ final class VitalsCollector: NSObject {
   private var memMax: UInt64 = 0
   private var intervalStart = CACurrentMediaTime()
   private var cpuStart = VitalsCollector.cpuSeconds()
+  // Main thread only.
+  private var started = false
+  private var foreground = true
+  /// A DispatchSource must be resumed as often as it was suspended.
+  private var timerRunning = false
 
   func start() {
     DispatchQueue.main.async {
-      guard self.link == nil else { return }
-      let link = CADisplayLink(target: self, selector: #selector(self.onFrame(_:)))
-      link.add(to: .main, forMode: .common)
-      self.link = link
-      let center = NotificationCenter.default
-      center.addObserver(self, selector: #selector(self.pause), name: UIApplication.didEnterBackgroundNotification, object: nil)
-      center.addObserver(self, selector: #selector(self.resume), name: UIApplication.willEnterForegroundNotification, object: nil)
+      if self.started { return }
+      self.started = true
+      if self.link == nil {
+        let link = CADisplayLink(target: self, selector: #selector(self.onFrame(_:)))
+        link.isPaused = true
+        link.add(to: .main, forMode: .common)
+        self.link = link
+        let center = NotificationCenter.default
+        center.addObserver(self, selector: #selector(self.pause), name: UIApplication.didEnterBackgroundNotification, object: nil)
+        center.addObserver(self, selector: #selector(self.resume), name: UIApplication.willEnterForegroundNotification, object: nil)
+        self.timer = self.makeMemoryTimer()
+        self.foreground = UIApplication.shared.applicationState != .background
+      }
+      self.apply()
     }
+  }
+
+  /// A new timer source is suspended until its first resume().
+  private func makeMemoryTimer() -> DispatchSourceTimer {
     let t = DispatchSource.makeTimerSource(queue: DispatchQueue.global(qos: .utility))
     t.schedule(deadline: .now(), repeating: 1.0)
     t.setEventHandler { [weak self] in self?.sampleMemory() }
-    t.resume()
-    timer = t
+    return t
   }
 
+  /// The session is not sampled: its vitals would not be sent.
+  func stop() {
+    DispatchQueue.main.async {
+      self.started = false
+      self.apply()
+    }
+  }
+
+  /// No frames are drawn in the background, and nothing is sent: the frame
+  /// callback and the memory timer would only wake the CPU.
   @objc private func pause() {
-    link?.isPaused = true
-    lock.lock()
-    lastFrame = 0
-    lock.unlock()
+    foreground = false
+    apply()
   }
 
   @objc private func resume() {
-    link?.isPaused = false
+    foreground = true
+    apply()
+  }
+
+  /// Runs the display link and the memory timer only when started and in
+  /// the foreground. Main thread.
+  private func apply() {
+    let on = started && foreground
+    link?.isPaused = !on
+    if let t = timer, on != timerRunning {
+      if on { t.resume() } else { t.suspend() }
+      timerRunning = on
+    }
+    if !on {
+      lock.lock()
+      lastFrame = 0
+      lock.unlock()
+    }
   }
 
   @objc private func onFrame(_ link: CADisplayLink) {

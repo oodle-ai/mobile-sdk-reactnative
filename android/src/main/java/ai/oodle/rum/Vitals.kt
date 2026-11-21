@@ -41,6 +41,18 @@ object Vitals {
   private var intervalStartMs = 0L
   private var cpuStartTicks = -1L
   private var sampler: Handler? = null
+  /** The memory sampler runs. Guarded by lock. */
+  private var sampling = false
+  /** No frames and no memory samples in the background. */
+  @Volatile private var foreground = true
+
+  private val sampleTask =
+    object : Runnable {
+      override fun run() {
+        sampleMemory()
+        synchronized(lock) { if (sampling) sampler?.postDelayed(this, MEMORY_SAMPLE_MS) }
+      }
+    }
 
   private val frameCallback =
     object : Choreographer.FrameCallback {
@@ -63,34 +75,58 @@ object Vitals {
       if (rate > 1f) expectedFrameNs = (1_000_000_000L / rate).toLong()
     } catch (_: Throwable) {
     }
-    UiThreadUtil.runOnUiThread { Choreographer.getInstance().postFrameCallback(frameCallback) }
-    val ht = HandlerThread("oodle-rum-vitals").apply { start() }
-    val h = Handler(ht.looper)
-    sampler = h
-    h.post(
-      object : Runnable {
-        override fun run() {
-          sampleMemory()
-          h.postDelayed(this, MEMORY_SAMPLE_MS)
-        }
-      },
-    )
+    if (foreground) begin()
     return true
   }
 
-  /** No frames are drawn in the background; the callback would only wake the CPU. */
+  /** The session is not sampled: its vitals would not be sent. */
+  fun stop(): Boolean {
+    synchronized(lock) {
+      if (!started) return true
+      started = false
+    }
+    halt()
+    return true
+  }
+
+  /**
+   * No frames are drawn in the background, and nothing is sent: the frame
+   * callback and the memory sampler would only wake the CPU.
+   */
   fun pause() {
+    foreground = false
+    halt()
+  }
+
+  fun resume() {
+    foreground = true
+    synchronized(lock) { if (!started) return }
+    begin()
+  }
+
+  private fun begin() {
+    UiThreadUtil.runOnUiThread {
+      Choreographer.getInstance().removeFrameCallback(frameCallback)
+      Choreographer.getInstance().postFrameCallback(frameCallback)
+    }
+    synchronized(lock) {
+      if (sampling) return
+      sampling = true
+      val h =
+        sampler ?: Handler(HandlerThread("oodle-rum-vitals").apply { start() }.looper).also { sampler = it }
+      h.removeCallbacks(sampleTask)
+      h.post(sampleTask)
+    }
+  }
+
+  private fun halt() {
     UiThreadUtil.runOnUiThread {
       Choreographer.getInstance().removeFrameCallback(frameCallback)
       synchronized(lock) { lastFrameNs = 0L }
     }
-  }
-
-  fun resume() {
-    synchronized(lock) { if (!started) return }
-    UiThreadUtil.runOnUiThread {
-      Choreographer.getInstance().removeFrameCallback(frameCallback)
-      Choreographer.getInstance().postFrameCallback(frameCallback)
+    synchronized(lock) {
+      sampling = false
+      sampler?.removeCallbacks(sampleTask)
     }
   }
 

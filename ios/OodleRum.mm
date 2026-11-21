@@ -140,6 +140,16 @@ RCT_EXPORT_MODULE()
   return @([OodleRumImpl.shared startWatchdog:thresholdMs]);
 }
 
+- (NSNumber *)stopWatchdog
+{
+  return @([OodleRumImpl.shared stopWatchdog]);
+}
+
+- (NSNumber *)stopVitals
+{
+  return @([OodleRumImpl.shared stopVitals]);
+}
+
 - (NSString *)drainNativeEvents
 {
   return [OodleRumImpl.shared drainNativeEvents];
