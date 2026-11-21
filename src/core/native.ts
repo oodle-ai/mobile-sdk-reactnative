@@ -173,14 +173,42 @@ export const storage = {
   },
 };
 
+export interface NativePostResult {
+  status: number;
+  rateLimits: string | null;
+  date: string | null;
+}
+
 export const native = {
+  /** False on an app whose native code is older than this JS (an OTA update). */
+  canPostGzip(): boolean {
+    return mod !== null && typeof mod.postGzip === 'function';
+  },
+  postGzip(url: string, headers: Record<string, string>, body: string): Promise<NativePostResult> {
+    if (!mod || typeof mod.postGzip !== 'function') return Promise.reject(new Error('native module missing'));
+    try {
+      return mod.postGzip(url, JSON.stringify(headers), body).then((raw) => {
+        const r = parse<{ status?: unknown; rateLimits?: unknown; date?: unknown }>(raw, {});
+        return {
+          status: typeof r.status === 'number' ? r.status : 0,
+          rateLimits: typeof r.rateLimits === 'string' ? r.rateLimits : null,
+          date: typeof r.date === 'string' ? r.date : null,
+        };
+      });
+    } catch (e) {
+      return Promise.reject(e);
+    }
+  },
   enableCrashReporting: () => call((m) => m.enableCrashReporting(), false),
   consumePendingCrash: (): NativeCrash | null =>
     parse<NativeCrash | null>(call((m) => m.consumePendingCrash(), null), null),
   startWatchdog: (ms: number) => call((m) => m.startWatchdog(ms), false),
+  // Native code older than this JS (an OTA update) has no stop methods.
+  stopWatchdog: () => call((m) => (typeof m.stopWatchdog === 'function' ? m.stopWatchdog() : false), false),
   drainNativeEvents: (): NativeEvent[] =>
     parse<NativeEvent[]>(call((m) => m.drainNativeEvents(), '[]'), []),
   startVitals: () => call((m) => m.startVitals(), false),
+  stopVitals: () => call((m) => (typeof m.stopVitals === 'function' ? m.stopVitals() : false), false),
   collectVitals: (): NativeVitals =>
     parse<NativeVitals>(call((m) => m.collectVitals(), '{}'), {}),
   getConnectivity: () => call((m) => m.getConnectivity(), 'unknown'),

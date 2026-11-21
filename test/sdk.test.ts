@@ -78,6 +78,7 @@ class FakeXHR {
   readyState = 0;
   headers: Record<string, string> = {};
   private listeners: Array<() => void> = [];
+  private abortListeners: Array<() => void> = [];
   onreadystatechange: unknown = null;
   open(_m: string, _u: string) {}
   setRequestHeader(k: string, v: string) {
@@ -85,6 +86,14 @@ class FakeXHR {
   }
   addEventListener(ev: string, fn: () => void) {
     if (ev === 'loadend') this.listeners.push(fn);
+    if (ev === 'abort') this.abortListeners.push(fn);
+  }
+  /** As React Native's XHR: abort, then loadend, with status 0. */
+  abort() {
+    this.readyState = 4;
+    for (const fn of this.abortListeners) fn();
+    for (const fn of this.listeners) fn();
+    this.listeners = [];
   }
   getResponseHeader(name: string) {
     return name === 'content-length' ? '68' : null;
@@ -107,6 +116,9 @@ const fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
 const fakeFetch = vi.fn((input: unknown, init?: { headers?: Record<string, string> }) => {
   const url = String(input);
   fetchCalls.push({ url, headers: { ...(init?.headers ?? {}) } });
+  if (url.includes('cancelled')) {
+    return Promise.reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+  }
   if (url.includes('polyfill')) {
     const xhr = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
     xhr.open('GET', url);
@@ -394,6 +406,23 @@ describe('OodleRum end to end', () => {
     expect(resources.filter((r) => String(r.url_full).includes('polyfill'))).toHaveLength(1);
   });
 
+  // An app cancels requests on purpose (a screen closes, a search
+  // changes). That is not a network failure.
+  it('records cancelled requests without a network error', async () => {
+    const xhr = new FakeXHR() as unknown as XMLHttpRequest;
+    xhr.open('GET', 'https://cdn.other.test/aborted-xhr.json');
+    xhr.send();
+    (xhr as unknown as FakeXHR).abort();
+    const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    await expect(appFetch('https://cdn.other.test/cancelled-fetch.json')).rejects.toMatchObject({ name: 'AbortError' });
+    await settle();
+    const urls = events('resource').map((r) => String(r.url_full));
+    expect(urls).toContain('https://cdn.other.test/aborted-xhr.json');
+    expect(urls).toContain('https://cdn.other.test/cancelled-fetch.json');
+    const failed = events('error').filter((e) => e.error_source === 'network').map((e) => String(e.url_full));
+    expect(failed.filter((u) => u.includes('aborted') || u.includes('cancelled'))).toEqual([]);
+  });
+
   // Another tracing SDK (or the app) set the header first: it is kept,
   // and the resource gets that trace.
   it('keeps a traceparent that is already set and records its trace', async () => {
@@ -462,6 +491,53 @@ describe('OodleRum end to end', () => {
     sdk.OodleRum.addAction('after replay');
     await settle();
     expect(events('action').find((a) => a.action_name === 'after replay')!.replay_id).toBe(sdk.OodleRum.getSessionId());
+  });
+
+  // A list can still move after a drag; a capture then costs frames.
+  it('captures again after a tap, and not after a drag', async () => {
+    await settle(2000);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchMove(100, 260);
+    recorder.recordTouchEnd(100, 320, false);
+    await vi.advanceTimersByTimeAsync(700);
+    // At most the capture loop's own capture.
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeLessThanOrEqual(1);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchEnd(102, 201, true);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // A touch on a custom PIN pad shows which digit was typed.
+  it('records no touches over hidden or masked views', async () => {
+    const before = screen;
+    screen = {
+      ...screen,
+      nodes: [...screen.nodes, { id: 50, k: 'h', x: 0, y: 500, w: 412, h: 200 }],
+      masks: [[0, 750, 412, 100]],
+    } as typeof screen;
+    recorder.onViewChanged();
+    await settle(2000);
+    uploads.length = 0;
+    for (const [x, y] of [
+      [50, 600],
+      [60, 800],
+      [70, 100],
+    ]) {
+      recorder.recordTouchStart(x, y);
+      recorder.recordTouchEnd(x, y, true);
+    }
+    await settle(7000);
+    const touches = all('replay')
+      .flatMap((seg) => seg.events as Array<{ type: number; data: Record<string, unknown> }>)
+      .filter((e) => e.type === 3 && e.data.source === 2);
+    expect(touches.length).toBeGreaterThan(0);
+    expect(new Set(touches.map((e) => e.data.x))).toEqual(new Set([70]));
+    screen = before;
+    recorder.onViewChanged();
+    await settle(2000);
   });
 
   it('pairs background and foreground, ends the view and saves the outbox', async () => {

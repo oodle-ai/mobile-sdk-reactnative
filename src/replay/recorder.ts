@@ -18,6 +18,7 @@ import {
   IncrementalSource,
   MouseInteraction,
   WireframeRecorder,
+  privateAreas,
   type RRWebEvent,
   type WireframeSnapshot,
 } from './rrweb';
@@ -33,7 +34,15 @@ const SEGMENT_MAX_EVENTS = 200;
 const SEGMENT_MAX_BYTES = 60_000;
 const SEGMENT_MAX_AGE_MS = 5000;
 const TOUCH_MOVE_THROTTLE_MS = 50;
+/**
+ * A touch that moves further than this (dp) is a drag or a scroll. Its
+ * follow-up captures are skipped: a list can still move after the finger
+ * lifts, and each capture during that motion costs main thread time when
+ * frames matter most. The capture loop records where the motion ends.
+ */
+const DRAG_SLOP_DP = 10;
 const MAX_NODES = 2000;
+const MAX_HIDDEN_AREAS = 200;
 
 let recorder: WireframeRecorder | null = null;
 let wanted = false;
@@ -50,6 +59,10 @@ let segmentTimer: ReturnType<typeof setTimeout> | null = null;
 let segmentSessionId = '';
 let flushedSessionId = '';
 let lastTouchMove = 0;
+let touchStart: { x: number; y: number } | null = null;
+/** Hidden and masked areas of the last snapshot, as [x, y, w, h]. */
+let hiddenAreas: Array<[number, number, number, number]> = [];
+let dragging = false;
 
 function eligible(): boolean {
   const c = getConfig();
@@ -99,7 +112,10 @@ function push(events: RRWebEvent[]) {
     // errors at the wrong place.
     if (offset) e.timestamp += offset;
     segment.push(e);
-    segmentBytes += estimateJsonBytes(e, SEGMENT_MAX_BYTES);
+    // Measured in full: the transport counts these bytes toward its batch
+    // size, and a full snapshot with pictures can be far larger than a
+    // segment.
+    segmentBytes += estimateJsonBytes(e);
   }
   if (segment.length >= SEGMENT_MAX_EVENTS || segmentBytes >= SEGMENT_MAX_BYTES) {
     flushSegment();
@@ -118,12 +134,18 @@ async function capture() {
   try {
     const full = pendingFull || Date.now() - lastFullAt > FULL_SNAPSHOT_EVERY_MS;
     // On an idle screen native code skips the walk, unless a full
-    // snapshot is due, which needs the whole screen.
-    const raw = await native.captureWireframes({ maxNodes: MAX_NODES, skipUnchanged: !full });
+    // snapshot is due, which needs the whole screen, or pictures wait to
+    // be sent.
+    const skipUnchanged = !full && !recorder.hasDeferredPictures;
+    const raw = await native.captureWireframes({ maxNodes: MAX_NODES, skipUnchanged });
     if (!recording || !recorder) return;
     const snapshot = JSON.parse(raw) as WireframeSnapshot & { unchanged?: boolean };
     if (snapshot?.unchanged) return;
     if (!snapshot || !Array.isArray(snapshot.nodes) || !(snapshot.width > 0)) return;
+    const areas = privateAreas(snapshot);
+    // A cut walk did not reach every view: keep the areas known before,
+    // up to a limit, as repeated cut walks would add the same areas again.
+    hiddenAreas = snapshot.truncated ? areas.concat(hiddenAreas).slice(0, MAX_HIDDEN_AREAS) : areas;
     const now = Date.now();
     const result = recorder.apply(snapshot, now, href(), full);
     if (result.full) {
@@ -173,6 +195,7 @@ export function syncRecording() {
     stopLoop();
     flushSegment();
     recorder?.reset();
+    hiddenAreas = [];
   }
 }
 
@@ -235,12 +258,25 @@ export function onReplayForeground() {
 
 // --- Touches, from OodleProvider ---
 
-function touchAllowed(): boolean {
-  return recording && getConfig()?.replay.touchPrivacy !== 'hide';
+function touchAllowed(x: number, y: number): boolean {
+  if (!recording || getConfig()?.replay.touchPrivacy === 'hide') return false;
+  // No touch over a hidden or masked view: its position can show what
+  // was typed (a custom PIN pad).
+  for (const [ax, ay, aw, ah] of hiddenAreas) {
+    if (x >= ax && x <= ax + aw && y >= ay && y <= ay + ah) return false;
+  }
+  return true;
+}
+
+function trackDrag(x: number, y: number) {
+  if (!touchStart || dragging) return;
+  if (Math.abs(x - touchStart.x) > DRAG_SLOP_DP || Math.abs(y - touchStart.y) > DRAG_SLOP_DP) dragging = true;
 }
 
 export function recordTouchStart(x: number, y: number) {
-  if (!touchAllowed()) return;
+  touchStart = { x, y };
+  dragging = false;
+  if (!touchAllowed(x, y)) return;
   push([
     {
       type: EventType.IncrementalSnapshot,
@@ -251,7 +287,8 @@ export function recordTouchStart(x: number, y: number) {
 }
 
 export function recordTouchMove(x: number, y: number) {
-  if (!touchAllowed()) return;
+  trackDrag(x, y);
+  if (!touchAllowed(x, y)) return;
   const now = Date.now();
   if (now - lastTouchMove < TOUCH_MOVE_THROTTLE_MS) return;
   lastTouchMove = now;
@@ -265,8 +302,12 @@ export function recordTouchMove(x: number, y: number) {
 }
 
 export function recordTouchEnd(x: number, y: number, tap: boolean) {
-  if (recording) scheduleFollowUps();
-  if (!touchAllowed()) return;
+  trackDrag(x, y);
+  const dragged = dragging;
+  touchStart = null;
+  dragging = false;
+  if (recording && !dragged) scheduleFollowUps();
+  if (!touchAllowed(x, y)) return;
   const now = Date.now();
   const events: RRWebEvent[] = [
     {
@@ -307,4 +348,7 @@ export function resetReplay() {
   segmentSessionId = '';
   flushedSessionId = '';
   lastTouchMove = 0;
+  touchStart = null;
+  dragging = false;
+  hiddenAreas = [];
 }

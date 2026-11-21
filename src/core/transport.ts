@@ -6,7 +6,7 @@ import { getConfig } from './config';
 import { uuid } from './ids';
 import { INTERNAL_REQUEST } from './internal';
 import { logger } from './logger';
-import { storage } from './native';
+import { native, storage } from './native';
 import { estimateJsonBytes } from './size';
 import { incrTelemetry } from './telemetry';
 
@@ -20,7 +20,6 @@ export const TELEMETRY_BATCH_KEY = 'sdk_telemetry';
 const MAX_BATCH_ITEMS = 50;
 const MAX_BATCH_BYTES = 500_000;
 const MAX_ITEM_BYTES = 256_000;
-const REPLAY_MEASURE_LIMIT = 64_000;
 /** Items held while consent is pending, per batch key. */
 const MAX_HELD_ITEMS = 1000;
 const MAX_IN_FLIGHT = 4;
@@ -40,6 +39,8 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** Upper bound for the outbox that survives an app restart. */
 const MAX_OUTBOX_CHARS = 4_000_000;
 const OUTBOX_KEY = 'outbox';
+/** The `sdk_name` of the envelope header, so the collector can tell this SDK from the browser SDK. */
+export const SDK_NAME = 'react-native';
 /**
  * The id of a body, the same on every send of it, so the collector can
  * tell a body it already has: a body is sent again when its answer was
@@ -103,6 +104,12 @@ let authWarned = false;
  * just before the process ends: the next start would send it again.
  */
 let sendsHeld = false;
+/**
+ * True from deferRestoreOutbox() until the outbox of the last run is read.
+ * A write of the outbox before that reads it first: the file on disk is
+ * the only copy of what it holds.
+ */
+let restorePending = false;
 const rateLimitedUntil = new Map<string, number>();
 
 function xhrPost(
@@ -167,9 +174,11 @@ function getQueue(key: string): Queue {
 function measure(key: string, item: Payload, hint?: number) {
   if (key === REPLAY_BATCH_KEY) {
     // A full snapshot cannot be split, and the recorder already bounds
-    // segment size, so replay items are never rejected for size.
+    // segment size, so replay items are never rejected for size. They are
+    // measured in full: a capped measure let a "500 KB" batch hold
+    // several megabytes of snapshots.
     return {
-      bytes: hint ?? estimateJsonBytes(item, REPLAY_MEASURE_LIMIT),
+      bytes: hint ?? estimateJsonBytes(item),
       oversized: false,
     };
   }
@@ -262,7 +271,7 @@ export function buildEnvelope(
       break;
     }
   }
-  const lines = [JSON.stringify({ session_id: sessionId, sdk_version: SDK_VERSION })];
+  const lines = [JSON.stringify({ session_id: sessionId, sdk_name: SDK_NAME, sdk_version: SDK_VERSION })];
   for (const s of sections) {
     lines.push(JSON.stringify({ type: s.type, count: s.items.length }));
     lines.push(JSON.stringify(s.items));
@@ -340,7 +349,9 @@ function headers(item: RetryItem): Record<string, string> {
  * a binary body, so a body compressed in JS arrives without the header
  * and the collector cannot read it. For a string body with
  * `Content-Encoding: gzip`, Android compresses the body itself, off the
- * JS thread. iOS sends the body as given, so there it is compressed in JS.
+ * JS thread. iOS sends the body as given, so there native code compresses
+ * and sends it (post); this is the fallback for native code without
+ * postGzip (a JS update on an older app).
  */
 function compress(raw: string): { body: Uint8Array | string; gzip: boolean } {
   if (Platform.OS === 'android') return { body: raw, gzip: true };
@@ -350,6 +361,21 @@ function compress(raw: string): { body: Uint8Array | string; gzip: boolean } {
     incrTelemetry('compression_failures');
     return { body: raw, gzip: false };
   }
+}
+
+/**
+ * Sends one body. On iOS, native code compresses and posts it off the JS
+ * thread: gzip of a 500 KB body in JS, and the base64 copy that React
+ * Native makes of a binary request body, blocked the JS thread on each
+ * upload. A test poster (setPoster) gets the body as before.
+ */
+function post(url: string, h: Record<string, string>, raw: string): Promise<PostResult> {
+  if (Platform.OS === 'ios' && poster === xhrPost && native.canPostGzip()) {
+    return native.postGzip(url, h, raw);
+  }
+  const { body, gzip } = compress(raw);
+  if (gzip) h['Content-Encoding'] = 'gzip';
+  return poster(url, h, body);
 }
 
 function parseRateLimits(header: string | null) {
@@ -381,11 +407,8 @@ async function sendBody(item: RetryItem): Promise<void> {
   }
   inFlight.add(item);
   try {
-    const { body, gzip } = compress(item.body);
-    const h = headers(item);
-    if (gzip) h['Content-Encoding'] = 'gzip';
     const sentAt = Date.now();
-    const res = await poster(`${config.endpoint}${INGEST_PATH}`, h, body);
+    const res = await post(`${config.endpoint}${INGEST_PATH}`, headers(item), item.body);
     if (res.status > 0) observeServerDate(res.date, sentAt, Date.now());
     parseRateLimits(res.rateLimits);
     if (res.status === 429 || res.status >= 500) {
@@ -560,6 +583,15 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
+  if (restorePending) {
+    // The outbox of the last run is not read yet; a write now would
+    // replace it. It is read first, and sent later: this write can come
+    // from the fatal error handler, which holds sends.
+    restorePending = false;
+    loadOutbox();
+    scheduleRetryDrain();
+    if (hasQueuedItems()) scheduleFlush();
+  }
   const held: Record<string, Payload[]> = {};
   for (const [key, q] of queues) if (q.items.length > 0) held[key] = q.items.slice();
   const retry = [...inFlight, ...retryQueue].map((r) => ({ ...r, notBefore: 0 }));
@@ -567,24 +599,27 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
     removeOutbox();
     return;
   }
-  // Drop the oldest retries by their body size first, so the queue is
-  // serialized once and not once per dropped item.
-  let retryChars = 0;
-  for (const r of retry) retryChars += r.body.length;
-  while (retry.length > 0 && retryChars > MAX_OUTBOX_CHARS) {
-    retryChars -= retry.shift()!.body.length;
+  // Each item is serialized once, and the oldest are dropped by their
+  // serialized length. JSON escapes the quotes and line breaks of a body,
+  // so the raw body length was short by about 10%, and the whole queue
+  // was serialized again once per dropped body.
+  const parts = retry.map((r) => JSON.stringify(r));
+  const heldJson = JSON.stringify(held);
+  // The text is '{"retry":[' + parts joined by ',' + '],"held":' + heldJson + '}'.
+  let length = '{"retry":[],"held":}'.length + heldJson.length;
+  for (const part of parts) length += part.length;
+  if (parts.length > 1) length += parts.length - 1;
+  let first = 0;
+  while (first < parts.length && length > MAX_OUTBOX_CHARS) {
+    length -= parts[first].length + (parts.length - first > 1 ? 1 : 0);
+    first++;
     incrTelemetry('outbox_drops');
   }
-  let raw = JSON.stringify({ retry, held } satisfies Outbox);
-  while (raw.length > MAX_OUTBOX_CHARS && retry.length > 0) {
-    retry.shift();
-    incrTelemetry('outbox_drops');
-    raw = JSON.stringify({ retry, held } satisfies Outbox);
-  }
-  if (raw.length > MAX_OUTBOX_CHARS) {
+  if (length > MAX_OUTBOX_CHARS) {
     incrTelemetry('outbox_drops');
     return;
   }
+  const raw = `{"retry":[${parts.slice(first).join(',')}],"held":${heldJson}}`;
   if (opts.sync) storage.set(OUTBOX_KEY, raw);
   else storage.setAsync(OUTBOX_KEY, raw);
   outboxOnDisk = true;
@@ -592,22 +627,36 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
 }
 
 /**
- * Loads the outbox written by an earlier run and queues it to send.
- *
- * The file stays until the bodies have their answers (syncOutboxAfterSend
- * removes it), or the app could end again before they are sent, and lose
- * them. Events queued before this (the crash that ended the last run,
- * which native code read and removed) are written to it now, for the same
- * reason.
+ * Reads the outbox of the last run after the app shows its first frame
+ * (`schedule`). Reading and parsing up to 4 MB at start delayed the first
+ * frame. Until then a write of the outbox reads it first (persistOutbox).
+ * Call restoreOutbox() at once instead when an event is already queued (a
+ * crash read from native code): it must reach disk now.
  */
-export function restoreOutbox() {
+export function deferRestoreOutbox(schedule: (fn: () => void) => void) {
+  restorePending = true;
+  schedule(() => {
+    if (restorePending) restoreOutbox();
+  });
+}
+
+/** True when an event is queued and not sent yet. */
+export function hasQueuedItems(): boolean {
+  return Array.from(queues.values()).some((q) => q.items.length > 0);
+}
+
+function scheduleRetryDrain() {
+  if (retryTimer || retryQueue.length === 0) return;
+  retryTimer = setTimeout(() => {
+    retryTimer = null;
+    drainRetries();
+  }, getConfig()?.flushIntervalMs ?? 5000);
+}
+
+/** Adds the outbox of the last run to the queues. False when there is none. */
+function loadOutbox(): boolean {
   const box = storage.getJSON<Outbox | null>(OUTBOX_KEY, null);
-  if (!box) {
-    // Nothing to send again. A crash read from native code is queued,
-    // and goes to disk now; it is sent with the next flush.
-    if (Array.from(queues.values()).some((q) => q.items.length > 0)) persistOutbox();
-    return;
-  }
+  if (!box) return false;
   const now = Date.now();
   for (const r of box.retry ?? []) {
     if (typeof r.body !== 'string') continue;
@@ -636,6 +685,26 @@ export function restoreOutbox() {
       q.bytes += measure(key, item).bytes;
     }
   }
+  return true;
+}
+
+/**
+ * Loads the outbox written by an earlier run and queues it to send.
+ *
+ * The file stays until the bodies have their answers (syncOutboxAfterSend
+ * removes it), or the app could end again before they are sent, and lose
+ * them. Events queued before this (the crash that ended the last run,
+ * which native code read and removed) are written to it now, for the same
+ * reason.
+ */
+export function restoreOutbox() {
+  restorePending = false;
+  if (!loadOutbox()) {
+    // Nothing to send again. A crash read from native code is queued,
+    // and goes to disk now; it is sent with the next flush.
+    if (hasQueuedItems()) persistOutbox();
+    return;
+  }
   // Writes the outbox again with all of it, or removes an empty one.
   persistOutbox();
   if (canSend()) {
@@ -655,6 +724,8 @@ export function clearAll() {
   }
   retryQueue = [];
   retryBytes = 0;
+  // The outbox of the last run is deleted unread.
+  restorePending = false;
   removeOutbox();
 }
 
@@ -673,6 +744,7 @@ export function resetTransport() {
   retryBytes = 0;
   outboxOnDisk = outboxHasHeld = false;
   sendsHeld = false;
+  restorePending = false;
   inFlight.clear();
   canSend = () => true;
   replayDropHandler = null;

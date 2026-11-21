@@ -30,10 +30,14 @@ export interface Spec extends TurboModule {
 
   /** Starts the main thread watchdog (ANR on Android, hang on iOS). */
   startWatchdog(thresholdMs: number): boolean;
+  /** Stops the watchdog until the next startWatchdog (a session that is not sampled). */
+  stopWatchdog(): boolean;
   /** Returns and clears the native events since the last call. JSON array. */
   drainNativeEvents(): string;
 
   startVitals(): boolean;
+  /** Stops frame and memory sampling until the next startVitals. */
+  stopVitals(): boolean;
   /** Returns and resets frame, memory and CPU stats. JSON object. */
   collectVitals(): string;
 
@@ -46,6 +50,16 @@ export interface Spec extends TurboModule {
    * change since the last walk.
    */
   captureWireframes(optionsJson: string): Promise<string>;
+
+  /**
+   * iOS: compresses `body` with gzip and posts it, both off the JS thread.
+   * `headersJson` is a JSON object of request headers; native code adds
+   * `Content-Encoding: gzip` when it compressed the body. Resolves with
+   * JSON `{status, rateLimits?, date?}` for any answer, and rejects when
+   * the collector could not be reached. Android rejects: React Native
+   * compresses there already (see transport.ts).
+   */
+  postGzip(url: string, headersJson: string, body: string): Promise<string>;
 }
 
 export default TurboModuleRegistry.get<Spec>('OodleRum');
