@@ -304,18 +304,24 @@ export class WireframeRecorder {
     return this.nextId++;
   }
 
-  private serialize(r: Rendered): { node: SerializedNode; tracked: Tracked } {
+  /**
+   * The element of a view and its children. A full snapshot nests the
+   * children in the element. A mutation must add each child on its own:
+   * rrweb builds an added node without its childNodes.
+   */
+  private serialize(r: Rendered): { node: SerializedNode; children: SerializedNode[]; tracked: Tracked } {
     const rid = this.alloc();
     const tid = r.text !== null ? this.alloc() : null;
+    const children: SerializedNode[] =
+      tid !== null ? [{ type: NodeType.Text, textContent: r.text ?? '', id: tid }] : [];
     const node: SerializedNode = {
       type: NodeType.Element,
       tagName: 'div',
       attributes: { style: r.style },
-      childNodes:
-        tid !== null ? [{ type: NodeType.Text, textContent: r.text ?? '', id: tid }] : [],
+      childNodes: [],
       id: rid,
     };
-    return { node, tracked: { ...r, rid, tid } };
+    return { node, children, tracked: { ...r, rid, tid } };
   }
 
   /**
@@ -383,7 +389,8 @@ export class WireframeRecorder {
     this.order = [];
     const children: SerializedNode[] = [];
     for (const r of rendered) {
-      const { node, tracked } = this.serialize(r);
+      const { node, children: own, tracked } = this.serialize(r);
+      node.childNodes = own;
       children.push(node);
       this.tracked.set(r.nid, tracked);
       this.order.push(r.nid);
@@ -456,8 +463,9 @@ export class WireframeRecorder {
       const r = next[i];
       if (this.tracked.has(r.nid)) continue;
       const following = i + 1 < next.length ? this.tracked.get(next[i + 1].nid) : undefined;
-      const { node, tracked } = this.serialize(r);
+      const { node, children, tracked } = this.serialize(r);
       adds.push({ parentId: BODY_ID, nextId: following ? following.rid : null, node });
+      for (const child of children) adds.push({ parentId: tracked.rid, nextId: null, node: child });
       this.tracked.set(r.nid, tracked);
     }
 

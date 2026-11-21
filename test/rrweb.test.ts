@@ -121,6 +121,19 @@ describe('WireframeRecorder', () => {
     expect(replayed).toBe(expected);
   });
 
+  // rrweb builds an added node without its childNodes.
+  it('replays the text of a view added after the full snapshot', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const row: Wireframe = { id: 12, k: 't', x: 16, y: 300, w: 200, h: 20, tx: 'New row' };
+    const events = [
+      ...r.apply(snap([root, header, title]), 1000, 'h').events,
+      ...r.apply(snap([root, header, row, title]), 2000, 'h').events,
+    ];
+    const replayed = normalize(play(events));
+    expect(replayed).toContain('New row');
+    expect(replayed).toBe(normalize(play(fullOnly([root, header, row, title]))));
+  });
+
   it('takes a new full snapshot when the screen is resized or reordered', () => {
     const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
     r.apply(snap([root, header, title]), 1000, 'h');
