@@ -17,6 +17,12 @@ public final class OodleRumImpl: NSObject {
   private let pathMonitor = NWPathMonitor()
   private let lock = NSLock()
   private var connection = "unknown"
+  /// The background task that lets the last uploads finish. Main thread only.
+  private var uploadTask: UIBackgroundTaskIdentifier = .invalid
+
+  /// How long the app keeps running after it leaves the screen, so the
+  /// requests that JS sends as it goes get their answers.
+  private static let uploadWindow: TimeInterval = 10
 
   override private init() {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -47,6 +53,40 @@ public final class OodleRumImpl: NSObject {
     ) { [weak self] _ in
       self?.events.add(["type": "memory_warning", "timestamp": Self.nowMs(), "message": "Memory warning"])
     }
+    NotificationCenter.default.addObserver(
+      forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.beginUploadWindow()
+    }
+    NotificationCenter.default.addObserver(
+      forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+    ) { [weak self] _ in
+      self?.endUploadWindow()
+    }
+  }
+
+  /// iOS suspends an app seconds after it leaves the screen. JS sends its
+  /// last events then, and keeps each request in the outbox until its
+  /// answer arrives. An answer that arrived after the suspension was never
+  /// read, so the next start sent the request again and the collector
+  /// stored its events twice. A background task keeps the app running for
+  /// `uploadWindow`, which these requests need.
+  private func beginUploadWindow() {
+    endUploadWindow()
+    let task = UIApplication.shared.beginBackgroundTask(withName: "ai.oodle.rum.upload") { [weak self] in
+      self?.endUploadWindow()
+    }
+    uploadTask = task
+    DispatchQueue.main.asyncAfter(deadline: .now() + Self.uploadWindow) { [weak self] in
+      guard let self = self, self.uploadTask == task else { return }
+      self.endUploadWindow()
+    }
+  }
+
+  private func endUploadWindow() {
+    guard uploadTask != .invalid else { return }
+    UIApplication.shared.endBackgroundTask(uploadTask)
+    uploadTask = .invalid
   }
 
   static func nowMs() -> Int64 {
