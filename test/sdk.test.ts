@@ -545,17 +545,47 @@ describe('OodleRum end to end', () => {
     await settle(2000);
   });
 
-  it('pairs background and foreground, ends the view and saves the outbox', async () => {
+  it('pairs background and foreground, and goes on with the same view', async () => {
     rnStub.emitAppState('background');
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background']);
-    await vi.advanceTimersByTimeAsync(10);
+    // The update sent on the way out keeps the view open: a view closed
+    // here and again later would count twice in the vitals.
+    const out = events('view').filter((v) => v.app_screen_name === 'Notifications').at(-1)!;
+    expect(out.view_is_active).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
     rnStub.emitAppState('active');
     await settle();
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background', 'foreground']);
     expect(events('error').find((e) => e.error_source === 'anr')).toMatchObject({ exception_type: 'ANR' });
-    // The view restarts as a new instance after the app returns.
+    // One view with its start, as Datadog counts it: its time spent
+    // includes the minute away.
     const notif = events('view').filter((v) => v.app_screen_name === 'Notifications');
-    expect(new Set(notif.map((v) => v.view_id)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(notif.map((v) => v.view_id)).size).toBe(1);
+    const last = notif.at(-1)!;
+    expect(last.view_is_active).toBe(1);
+    expect(last.view_start).toBe(out.view_start);
+    expect(last.view_update_seq as number).toBeGreaterThan(out.view_update_seq as number);
+    expect(last.view_time_spent_ms as number).toBeGreaterThanOrEqual((out.view_time_spent_ms as number) + 60_000);
+  });
+
+  // Away longer than the session timeout: the session ended, so the
+  // return starts a new one, with a new view of the same screen.
+  it('starts a new session and view after a long time in the background', async () => {
+    sdk.OodleRum.startView('away-key', 'Away');
+    await settle();
+    const before = sdk.OodleRum.getSessionId();
+    const viewBefore = events('view').filter((v) => v.app_screen_name === 'Away').at(-1)!.view_id;
+    rnStub.emitAppState('background');
+    await vi.advanceTimersByTimeAsync(16 * 60_000);
+    uploads.length = 0;
+    rnStub.emitAppState('active');
+    await settle();
+    const after = sdk.OodleRum.getSessionId();
+    expect(after).not.toBe(before);
+    const away = events('view').filter((v) => v.app_screen_name === 'Away' && v.session_id === after);
+    expect(away.length).toBeGreaterThan(0);
+    expect(away[0].view_id).not.toBe(viewBefore);
+    expect(all('events').find((e) => e.session_id === after && e.session_is_new === 1)?.session_previous_id).toBe(before);
   });
 
   it('writes the outbox on a background thread', async () => {

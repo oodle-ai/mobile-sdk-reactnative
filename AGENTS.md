@@ -76,6 +76,15 @@ once the session has ended its events are dropped (`isSessionExpired`).
 on one screen started a new session every 15 minutes, which Datadog does
 not.
 
+As in Datadog's SDKs, each launch starts a session of its own at its first
+activity, linked to the last one (`session_previous_id`); the crash that
+ended the last run is still reported on its session (`reportPendingCrash`).
+A return to the app goes on with the view it left, with its id and start,
+and its time spent includes the time away. Only a session that ended while
+the app was away gives a new view. The update sent on the way to the
+background keeps the view open: readers take a view's vitals from its
+closing update, so closing it twice counts it twice.
+
 ## Replay is rrweb
 
 Native code returns wireframes; `src/replay/rrweb.ts` turns them into

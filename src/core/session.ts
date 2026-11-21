@@ -55,6 +55,15 @@ function scheduleWrite() {
   }, 1000);
 }
 
+/**
+ * The session of the last launch, ended. Each launch starts a session of
+ * its own at its first activity, as Datadog's SDKs do, and that session
+ * links to this one (`session_previous_id`). Kept across launches, one
+ * session held the crashes of several runs, and its crash-free rate did
+ * not match Datadog's on the same data. The crash that ended the last run
+ * is still reported on its own session, from the saved context
+ * (`reportPendingCrash`).
+ */
 function load(): SessionData | null {
   const raw = storage.getJSON<Partial<SessionData> | null>(SESSION_KEY, null);
   if (!raw || typeof raw.id !== 'string') return null;
@@ -62,7 +71,7 @@ function load(): SessionData | null {
   return {
     id: raw.id,
     createdAt: raw.createdAt ?? now,
-    lastActivity: raw.lastActivity ?? now,
+    lastActivity: 0,
     viewCount: raw.viewCount ?? 0,
     errorCount: raw.errorCount ?? 0,
     actionCount: raw.actionCount ?? 0,
