@@ -30,10 +30,14 @@ export interface Spec extends TurboModule {
 
   /** Starts the main thread watchdog (ANR on Android, hang on iOS). */
   startWatchdog(thresholdMs: number): boolean;
+  /** Stops the watchdog until the next startWatchdog (a session that is not sampled). */
+  stopWatchdog(): boolean;
   /** Returns and clears the native events since the last call. JSON array. */
   drainNativeEvents(): string;
 
   startVitals(): boolean;
+  /** Stops frame and memory sampling until the next startVitals. */
+  stopVitals(): boolean;
   /** Returns and resets frame, memory and CPU stats. JSON object. */
   collectVitals(): string;
 

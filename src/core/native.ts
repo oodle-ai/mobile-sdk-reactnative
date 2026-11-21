@@ -203,9 +203,12 @@ export const native = {
   consumePendingCrash: (): NativeCrash | null =>
     parse<NativeCrash | null>(call((m) => m.consumePendingCrash(), null), null),
   startWatchdog: (ms: number) => call((m) => m.startWatchdog(ms), false),
+  // Native code older than this JS (an OTA update) has no stop methods.
+  stopWatchdog: () => call((m) => (typeof m.stopWatchdog === 'function' ? m.stopWatchdog() : false), false),
   drainNativeEvents: (): NativeEvent[] =>
     parse<NativeEvent[]>(call((m) => m.drainNativeEvents(), '[]'), []),
   startVitals: () => call((m) => m.startVitals(), false),
+  stopVitals: () => call((m) => (typeof m.stopVitals === 'function' ? m.stopVitals() : false), false),
   collectVitals: (): NativeVitals =>
     parse<NativeVitals>(call((m) => m.collectVitals(), '{}'), {}),
   getConnectivity: () => call((m) => m.getConnectivity(), 'unknown'),

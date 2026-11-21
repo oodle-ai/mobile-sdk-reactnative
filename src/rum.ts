@@ -14,6 +14,7 @@ import { logger, setVerbosity } from './core/logger';
 import { hasNative, native } from './core/native';
 import {
   isSessionExpired,
+  isSessionSampled,
   onSessionRenew,
   peekSession,
   setSampleRates,
@@ -42,7 +43,8 @@ import {
   installErrorTracking,
   reportPendingCrash,
 } from './events/errors';
-import { installLifecycle } from './events/lifecycle';
+import { installLifecycle, isForeground } from './events/lifecycle';
+import { startLongTaskTracking, stopLongTaskTracking } from './events/longtasks';
 import { installResourceTracking } from './events/resources';
 import * as views from './events/views';
 import {
@@ -99,6 +101,29 @@ function afterFirstFrame(fn: () => void) {
   else setTimeout(fn, 0);
 }
 
+/**
+ * Runs the native watchdog and vitals, and the long task timer, only for
+ * a session that is sampled and while consent allows collection. Native
+ * code also stops them in the background.
+ */
+function syncCollectors() {
+  const config = getConfig();
+  if (!config) return;
+  const on = isSessionSampled() && getConsent() !== 'not-granted';
+  if (hasNative()) {
+    if (config.trackAnrs) {
+      if (on) native.startWatchdog(config.anrThresholdMs);
+      else native.stopWatchdog();
+    }
+    if (config.vitals) {
+      if (on) native.startVitals();
+      else native.stopVitals();
+    }
+  }
+  if (on && isForeground()) startLongTaskTracking();
+  else stopLongTaskTracking();
+}
+
 function init(input: OodleRumConfig): boolean {
   if (initialized) {
     logger.warn('init() was already called; this call is ignored');
@@ -120,12 +145,14 @@ function init(input: OodleRumConfig): boolean {
   setReplayIdProvider(replayIdForEvents);
   onSessionRenew((session, previous) => {
     onReplaySessionRenew(previous);
+    syncCollectors();
     views.restartViewForNewSession(session.id);
   });
   onConsentChange((next) => {
     if (next === 'granted') resume();
     else if (next === 'not-granted') clearAll();
     syncRecording();
+    syncCollectors();
   });
   views.onViewStart(() => onViewChanged());
 
@@ -134,8 +161,6 @@ function init(input: OodleRumConfig): boolean {
   if (hasNative()) {
     reportPendingCrash();
     if (config.nativeCrashReporting) native.enableCrashReporting();
-    if (config.trackAnrs) native.startWatchdog(config.anrThresholdMs);
-    if (config.vitals) native.startVitals();
   }
   // A crash from the last run is queued now and must reach disk at once.
   // Otherwise the outbox is read after the first frame: it can be 4 MB.
@@ -152,6 +177,7 @@ function init(input: OodleRumConfig): boolean {
     },
     onForeground: () => onReplayForeground(),
   });
+  syncCollectors();
   telemetryTimer = setInterval(flushTelemetry, TELEMETRY_INTERVAL_MS);
 
   initialized = true;
