@@ -64,9 +64,13 @@ static void OodleSignalHandler(int sig, siginfo_t *info, void *context)
       WriteAll(fd, "\ntime ");
       WriteNumber(fd, (long)time(NULL));
       WriteAll(fd, "\n");
-      void *frames[64];
-      int count = backtrace(frames, 64);
-      backtrace_symbols_fd(frames, count, fd);
+      void *frames[66];
+      int count = backtrace(frames, 66);
+      // The first two frames are this handler and _sigtramp, which every
+      // signal crash shares. The issue of a crash is named from its top
+      // frame, so the stack starts at the code the signal interrupted.
+      int skip = count > 2 ? 2 : 0;
+      backtrace_symbols_fd(frames + skip, count - skip, fd);
       close(fd);
     }
   }

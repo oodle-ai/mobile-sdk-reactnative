@@ -21,8 +21,12 @@ public final class OodleRumImpl: NSObject {
   private var uploadTask: UIBackgroundTaskIdentifier = .invalid
 
   /// How long the app keeps running after it leaves the screen, so the
-  /// requests that JS sends as it goes get their answers.
-  private static let uploadWindow: TimeInterval = 10
+  /// requests that JS sends as it goes get their answers. It is the
+  /// request timeout of the transport (REQUEST_TIMEOUT_MS): a shorter window
+  /// left a slow request unanswered. iOS may end the task sooner, and its
+  /// expiration handler ends it then; the batch id lets the collector drop
+  /// a body sent again after that.
+  private static let uploadWindow: TimeInterval = 30
 
   override private init() {
     let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
