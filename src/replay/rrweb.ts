@@ -67,6 +67,27 @@ export interface WireframeSnapshot {
    * views after the last node are missing, not removed.
    */
   truncated?: boolean;
+  /** Visible areas of OodlePrivacy mask views, as [x, y, w, h]. */
+  masks?: number[][];
+}
+
+/**
+ * The areas where touches are not recorded: hidden views and mask views.
+ * A touch on a custom PIN pad would show which digit was typed.
+ */
+export function privateAreas(snapshot: WireframeSnapshot): Array<[number, number, number, number]> {
+  const out: Array<[number, number, number, number]> = [];
+  for (const w of snapshot.nodes) {
+    if (!w || w.k !== 'h') continue;
+    const [t, r, b, l] = w.c ?? [0, 0, 0, 0];
+    out.push([w.x + l, w.y + t, w.w - l - r, w.h - t - b]);
+  }
+  for (const m of snapshot.masks ?? []) {
+    if (Array.isArray(m) && m.length === 4 && m.every((n) => typeof n === 'number')) {
+      out.push([m[0], m[1], m[2], m[3]]);
+    }
+  }
+  return out;
 }
 
 // rrweb constants (rrweb 2.x, @rrweb/types).

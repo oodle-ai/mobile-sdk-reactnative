@@ -18,6 +18,7 @@ import {
   IncrementalSource,
   MouseInteraction,
   WireframeRecorder,
+  privateAreas,
   type RRWebEvent,
   type WireframeSnapshot,
 } from './rrweb';
@@ -41,6 +42,7 @@ const TOUCH_MOVE_THROTTLE_MS = 50;
  */
 const DRAG_SLOP_DP = 10;
 const MAX_NODES = 2000;
+const MAX_HIDDEN_AREAS = 200;
 
 let recorder: WireframeRecorder | null = null;
 let wanted = false;
@@ -58,6 +60,8 @@ let segmentSessionId = '';
 let flushedSessionId = '';
 let lastTouchMove = 0;
 let touchStart: { x: number; y: number } | null = null;
+/** Hidden and masked areas of the last snapshot, as [x, y, w, h]. */
+let hiddenAreas: Array<[number, number, number, number]> = [];
 let dragging = false;
 
 function eligible(): boolean {
@@ -138,6 +142,10 @@ async function capture() {
     const snapshot = JSON.parse(raw) as WireframeSnapshot & { unchanged?: boolean };
     if (snapshot?.unchanged) return;
     if (!snapshot || !Array.isArray(snapshot.nodes) || !(snapshot.width > 0)) return;
+    const areas = privateAreas(snapshot);
+    // A cut walk did not reach every view: keep the areas known before,
+    // up to a limit, as repeated cut walks would add the same areas again.
+    hiddenAreas = snapshot.truncated ? areas.concat(hiddenAreas).slice(0, MAX_HIDDEN_AREAS) : areas;
     const now = Date.now();
     const result = recorder.apply(snapshot, now, href(), full);
     if (result.full) {
@@ -187,6 +195,7 @@ export function syncRecording() {
     stopLoop();
     flushSegment();
     recorder?.reset();
+    hiddenAreas = [];
   }
 }
 
@@ -249,8 +258,14 @@ export function onReplayForeground() {
 
 // --- Touches, from OodleProvider ---
 
-function touchAllowed(): boolean {
-  return recording && getConfig()?.replay.touchPrivacy !== 'hide';
+function touchAllowed(x: number, y: number): boolean {
+  if (!recording || getConfig()?.replay.touchPrivacy === 'hide') return false;
+  // No touch over a hidden or masked view: its position can show what
+  // was typed (a custom PIN pad).
+  for (const [ax, ay, aw, ah] of hiddenAreas) {
+    if (x >= ax && x <= ax + aw && y >= ay && y <= ay + ah) return false;
+  }
+  return true;
 }
 
 function trackDrag(x: number, y: number) {
@@ -261,7 +276,7 @@ function trackDrag(x: number, y: number) {
 export function recordTouchStart(x: number, y: number) {
   touchStart = { x, y };
   dragging = false;
-  if (!touchAllowed()) return;
+  if (!touchAllowed(x, y)) return;
   push([
     {
       type: EventType.IncrementalSnapshot,
@@ -273,7 +288,7 @@ export function recordTouchStart(x: number, y: number) {
 
 export function recordTouchMove(x: number, y: number) {
   trackDrag(x, y);
-  if (!touchAllowed()) return;
+  if (!touchAllowed(x, y)) return;
   const now = Date.now();
   if (now - lastTouchMove < TOUCH_MOVE_THROTTLE_MS) return;
   lastTouchMove = now;
@@ -292,7 +307,7 @@ export function recordTouchEnd(x: number, y: number, tap: boolean) {
   touchStart = null;
   dragging = false;
   if (recording && !dragged) scheduleFollowUps();
-  if (!touchAllowed()) return;
+  if (!touchAllowed(x, y)) return;
   const now = Date.now();
   const events: RRWebEvent[] = [
     {
@@ -335,4 +350,5 @@ export function resetReplay() {
   lastTouchMove = 0;
   touchStart = null;
   dragging = false;
+  hiddenAreas = [];
 }
