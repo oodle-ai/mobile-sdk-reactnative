@@ -259,13 +259,19 @@ public final class OodleRumImpl: NSObject {
 
   // MARK: Replay
 
-  /// The last walk result. Read and written on the main thread only.
-  private var lastCapture: String?
+  /// The last walk result. Read and written on `captureQueue` only.
+  fileprivate var lastCapture: NSDictionary?
+  /// Compares and serializes walk results off the main thread.
+  fileprivate let captureQueue = DispatchQueue(label: "ai.oodle.rum.replay", qos: .utility)
+  /// True while a walk runs. Main thread only.
+  fileprivate var capturing = false
 
-  /// Must run on the main thread. With `skipUnchanged`, a walk that gives
-  /// the same result as the last one returns a short marker, so the JS
-  /// side does not parse and compare the same screen again.
-  @objc public func captureWireframes(_ optionsJson: String) -> String {
+  /// Starts a walk. Must run on the main thread. OodleRum.mm calls
+  /// `step()` of the task on the main queue until it returns true, then
+  /// `finish(_:)`. With `skipUnchanged`, a walk that gives the same result
+  /// as the last one finishes with a short marker, so the JS side does not
+  /// parse and compare the same screen again.
+  @objc public func beginCapture(_ optionsJson: String) -> OodleCaptureTask {
     var maxNodes = 2000
     var skipUnchanged = false
     if let data = optionsJson.data(using: .utf8),
@@ -273,12 +279,61 @@ public final class OodleRumImpl: NSObject {
       if let n = options["maxNodes"] as? Int { maxNodes = n }
       skipUnchanged = (options["skipUnchanged"] as? Bool) ?? false
     }
-    let result = Self.json(WireframeWalker(maxNodes: maxNodes).capture())
-    if skipUnchanged && result == lastCapture {
-      return "{\"unchanged\":true}"
+    // The JS side waits for each walk; this is only a guard.
+    if capturing { return OodleCaptureTask(owner: self, walker: nil, skipUnchanged: true) }
+    capturing = true
+    return OodleCaptureTask(owner: self, walker: WireframeWalker(maxNodes: maxNodes), skipUnchanged: skipUnchanged)
+  }
+}
+
+/// One walk of the view tree, run in slices on the main thread.
+@objc(OodleCaptureTask)
+public final class OodleCaptureTask: NSObject {
+  private static let unchanged = "{\"unchanged\":true}"
+  private weak var owner: OodleRumImpl?
+  private let walker: WireframeWalker?
+  private let skipUnchanged: Bool
+  private var ended = false
+
+  fileprivate init(owner: OodleRumImpl, walker: WireframeWalker?, skipUnchanged: Bool) {
+    self.owner = owner
+    self.walker = walker
+    self.skipUnchanged = skipUnchanged
+  }
+
+  /// Runs one slice on the main thread. True when the walk is done.
+  @objc public func step() -> Bool {
+    guard let walker = walker, !ended else { return true }
+    return walker.step()
+  }
+
+  /// Gives the result on a background queue. Call on the main thread
+  /// after `step()` returned true.
+  @objc public func finish(_ completion: @escaping (String) -> Void) {
+    guard let walker = walker, let owner = owner, !ended else { return completion(Self.unchanged) }
+    ended = true
+    owner.capturing = false
+    let result = walker.result()
+    let skip = skipUnchanged
+    owner.captureQueue.async { [weak owner] in
+      let dict = result as NSDictionary
+      if skip, let last = owner?.lastCapture, last.isEqual(dict) {
+        return completion(Self.unchanged)
+      }
+      owner?.lastCapture = dict
+      // Key order does not matter to the JS side, so the keys are not sorted.
+      guard JSONSerialization.isValidJSONObject(result),
+            let data = try? JSONSerialization.data(withJSONObject: result),
+            let text = String(data: data, encoding: .utf8)
+      else { return completion("{}") }
+      completion(text)
     }
-    lastCapture = result
-    return result
+  }
+
+  /// Ends a walk that failed. Main thread.
+  @objc public func cancel() {
+    if walker != nil, !ended { owner?.capturing = false }
+    ended = true
   }
 }
 

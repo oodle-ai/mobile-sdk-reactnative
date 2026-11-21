@@ -112,12 +112,38 @@ RCT_EXPORT_MODULE()
                    reject:(RCTPromiseRejectBlock)reject
 {
   dispatch_async(dispatch_get_main_queue(), ^{
+    OodleCaptureTask *task = nil;
     @try {
-      resolve([OodleRumImpl.shared captureWireframes:optionsJson]);
+      task = [OodleRumImpl.shared beginCapture:optionsJson];
     } @catch (NSException *e) {
       reject(@"capture_failed", e.reason ?: e.name, nil);
+      return;
     }
+    [OodleRum runCaptureSlice:task resolve:resolve reject:reject];
   });
+}
+
+// One slice of a walk on the main thread, then the next slice on a later
+// turn of the main queue, so the screen can draw between slices. Each
+// slice runs in @try: a failure in monitoring code must never reach the app.
++ (void)runCaptureSlice:(OodleCaptureTask *)task
+                resolve:(RCTPromiseResolveBlock)resolve
+                 reject:(RCTPromiseRejectBlock)reject
+{
+  @try {
+    if (![task step]) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [OodleRum runCaptureSlice:task resolve:resolve reject:reject];
+      });
+      return;
+    }
+    [task finish:^(NSString *result) {
+      resolve(result);
+    }];
+  } @catch (NSException *e) {
+    [task cancel];
+    reject(@"capture_failed", e.reason ?: e.name, nil);
+  }
 }
 
 - (std::shared_ptr<facebook::react::TurboModule>)getTurboModule:
