@@ -46,6 +46,16 @@ export interface Spec extends TurboModule {
    * change since the last walk.
    */
   captureWireframes(optionsJson: string): Promise<string>;
+
+  /**
+   * iOS: compresses `body` with gzip and posts it, both off the JS thread.
+   * `headersJson` is a JSON object of request headers; native code adds
+   * `Content-Encoding: gzip` when it compressed the body. Resolves with
+   * JSON `{status, rateLimits?, date?}` for any answer, and rejects when
+   * the collector could not be reached. Android rejects: React Native
+   * compresses there already (see transport.ts).
+   */
+  postGzip(url: string, headersJson: string, body: string): Promise<string>;
 }
 
 export default TurboModuleRegistry.get<Spec>('OodleRum');
