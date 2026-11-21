@@ -127,6 +127,13 @@ describe('transport', () => {
     expect(sent).toHaveLength(2);
   });
 
+  // A measure capped at 64 KB let a "500 KB" batch hold megabytes of replay.
+  it('counts the full size of a replay item toward the batch size', async () => {
+    enqueue('replay', { session_id: 's1', segment_index: 0, events: [{ data: 'x'.repeat(600_000) }] });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent).toHaveLength(1);
+  });
+
   it('upserts by key', async () => {
     upsert('events', 'view:1', { v: 1 });
     upsert('events', 'view:1', { v: 2 });

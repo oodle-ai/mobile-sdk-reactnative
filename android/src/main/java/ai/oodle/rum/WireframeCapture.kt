@@ -539,13 +539,25 @@ object WireframeCapture {
   /** The newest picture of each drawing, and when it was taken. */
   private class VectorPicture(val key: String, val data: String, val at: Long)
 
+  /** Main thread only. */
   private val pictures = WeakHashMap<View, VectorPicture>()
+  /** Drawings whose picture a worker thread encodes now. Main thread only. */
+  private val encoding = WeakHashMap<View, Boolean>()
 
-  /** A drawing is drawn again at most this often. */
-  private const val VECTOR_REFRESH_MS = 2_000L
+  /**
+   * A drawing without a known content (react-native-svg) is drawn again at
+   * most this often. Its content cannot be read, so it is drawn to see.
+   */
+  private const val VECTOR_REFRESH_MS = 5_000L
   /** A larger drawing is a placeholder: its picture would be too big to send. */
   private const val VECTOR_MAX_DP = 640f
   private const val VECTOR_MAX_SCALE = 2f
+  /**
+   * A picture with more pixels than this is encoded on a worker thread: a
+   * large PNG can take tens of ms. A small one (an icon) is encoded at once,
+   * so it is in the snapshot that first shows it.
+   */
+  private const val VECTOR_SYNC_PIXELS = 128 * 128
 
   /**
    * A drawing as a PNG, at most twice its size in dp: a react-native-svg
@@ -558,6 +570,10 @@ object WireframeCapture {
    * and color): the picture is then drawn again only when that changes.
    * A react-native-svg drawing has no such name and is drawn again at most
    * every VECTOR_REFRESH_MS.
+   *
+   * While a large picture is encoded, the node keeps the last picture of
+   * the view, or none. When the encode ends, the next capture walks again
+   * (lastSignature) and sends it.
    */
   private fun vector(
     view: View,
@@ -576,10 +592,9 @@ object WireframeCapture {
     val key = "${view.width}x${view.height}|${content ?: ""}"
     val now = SystemClock.uptimeMillis()
     val cached = pictures[view]
-    if (cached != null && cached.key == key && (content != null || now - cached.at < VECTOR_REFRESH_MS)) {
-      n.put("img", cached.data)
-      return n
-    }
+    cached?.let { n.put("img", it.data) }
+    if (cached != null && cached.key == key && (content != null || now - cached.at < VECTOR_REFRESH_MS)) return n
+    if (encoding.containsKey(view)) return n
     try {
       val scale = min(w.density, VECTOR_MAX_SCALE)
       val bw = max(1, (wDp * scale).roundToInt())
@@ -588,16 +603,44 @@ object WireframeCapture {
       val canvas = Canvas(bitmap)
       canvas.scale(scale / w.density, scale / w.density)
       view.draw(canvas)
-      val out = ByteArrayOutputStream()
-      bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
-      bitmap.recycle()
-      val data = "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-      pictures[view] = VectorPicture(key, data, now)
-      n.put("img", data)
+      if (bw * bh <= VECTOR_SYNC_PIXELS) {
+        val data = encode(bitmap)
+        pictures[view] = VectorPicture(key, data, now)
+        n.put("img", data)
+        return n
+      }
+      encoding[view] = true
+      val ref = java.lang.ref.WeakReference(view)
+      worker.execute {
+        val data =
+          try {
+            encode(bitmap)
+          } catch (_: Throwable) {
+            bitmap.recycle()
+            null
+          }
+        main.post {
+          val v = ref.get() ?: return@post
+          encoding.remove(v)
+          if (data == null) return@post
+          val previous = pictures[v]?.data
+          pictures[v] = VectorPicture(key, data, SystemClock.uptimeMillis())
+          // The screen may not draw again: walk again to send the picture.
+          if (data != previous) lastSignature = null
+        }
+      }
     } catch (_: Throwable) {
-      // The placeholder stays.
+      // The placeholder, or the last picture, stays.
     }
     return n
+  }
+
+  /** PNG data URL of a bitmap. Recycles the bitmap. */
+  private fun encode(bitmap: Bitmap): String {
+    val out = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)
+    bitmap.recycle()
+    return "data:image/png;base64," + Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
   }
 
   private fun isSensitive(view: EditText): Boolean {
