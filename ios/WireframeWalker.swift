@@ -153,7 +153,12 @@ final class WireframeWalker {
   private func visit(_ item: Item) {
     let view = item.view
     // The walk runs in slices: a view can leave the screen between them.
-    if view.window == nil { return }
+    // A window has no window of its own, so it is checked by itself.
+    if let window = view as? UIWindow {
+      if window.isHidden || window.windowScene == nil { return }
+    } else if view.window == nil {
+      return
+    }
     if view.isHidden || view.bounds.width <= 0 || view.bounds.height <= 0 { return }
     let alpha = item.alpha * view.alpha
     if alpha <= 0.01 { return }
