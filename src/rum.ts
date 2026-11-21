@@ -24,8 +24,10 @@ import { takeTelemetry } from './core/telemetry';
 import {
   TELEMETRY_BATCH_KEY,
   clearAll,
+  deferRestoreOutbox,
   enqueue,
   flush as flushTransport,
+  hasQueuedItems,
   restoreOutbox,
   resume,
   setCanSend,
@@ -87,6 +89,16 @@ function flushTelemetry() {
   });
 }
 
+/**
+ * Runs `fn` after the next frame. init() can run inside the first render
+ * (OodleProvider), so work that can wait goes after it.
+ */
+function afterFirstFrame(fn: () => void) {
+  const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }).requestAnimationFrame;
+  if (typeof raf === 'function') raf(() => setTimeout(fn, 0));
+  else setTimeout(fn, 0);
+}
+
 function init(input: OodleRumConfig): boolean {
   if (initialized) {
     logger.warn('init() was already called; this call is ignored');
@@ -125,7 +137,10 @@ function init(input: OodleRumConfig): boolean {
     if (config.trackAnrs) native.startWatchdog(config.anrThresholdMs);
     if (config.vitals) native.startVitals();
   }
-  restoreOutbox();
+  // A crash from the last run is queued now and must reach disk at once.
+  // Otherwise the outbox is read after the first frame: it can be 4 MB.
+  if (hasQueuedItems()) restoreOutbox();
+  else deferRestoreOutbox(afterFirstFrame);
 
   if (config.trackErrors) installErrorTracking();
   if (config.trackConsole) installConsoleTracking();

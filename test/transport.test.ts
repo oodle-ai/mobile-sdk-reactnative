@@ -7,6 +7,7 @@ import {
   BATCH_ID_HEADER,
   buildEnvelope,
   clearAll,
+  deferRestoreOutbox,
   enqueue,
   flush,
   holdSends,
@@ -281,6 +282,89 @@ describe('transport', () => {
     expect(storage.get('outbox')).toContain('crash');
   });
 
+  // Reading a 4 MB outbox at start delayed the first frame.
+  it('reads the outbox later, and first when it is written before then', async () => {
+    setCanSend(() => false);
+    enqueue('events', { old: 1 });
+    persistOutbox();
+    restart();
+    let later: (() => void) | null = null;
+    deferRestoreOutbox((fn) => (later = fn));
+    expect(pendingCounts().queues.events ?? 0).toBe(0);
+    // A write before the read (the app goes to the background) keeps the
+    // old outbox: it is read first.
+    enqueue('events', { now: 1 });
+    persistOutbox({ sync: true });
+    const box = JSON.parse(storage.get('outbox')!);
+    expect(box.held.events).toHaveLength(2);
+    expect(box.held.events).toEqual(expect.arrayContaining([{ old: 1 }, { now: 1 }]));
+    // The scheduled read does not add it again.
+    later!();
+    expect(pendingCounts().queues.events).toBe(2);
+    setCanSend(() => true);
+    flush();
+    await vi.runAllTimersAsync();
+    const items = sent.flatMap((x) => x.lines[2] as unknown[]);
+    expect(items).toHaveLength(2);
+    expect(items).toEqual(expect.arrayContaining([{ old: 1 }, { now: 1 }]));
+  });
+
+  it('sends a deferred outbox when the read runs', async () => {
+    setCanSend(() => false);
+    enqueue('events', { n: 1 });
+    persistOutbox();
+    restart();
+    let later: (() => void) | null = null;
+    deferRestoreOutbox((fn) => (later = fn));
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent).toHaveLength(0);
+    later!();
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+    expect(storage.get('outbox')).toBeNull();
+  });
+
+  it('deletes a deferred outbox unread when consent is withdrawn', () => {
+    setCanSend(() => false);
+    enqueue('events', { n: 1 });
+    persistOutbox();
+    restart();
+    let later: (() => void) | null = null;
+    deferRestoreOutbox((fn) => (later = fn));
+    clearAll();
+    later!();
+    expect(storage.get('outbox')).toBeNull();
+    expect(pendingCounts().queues.events ?? 0).toBe(0);
+  });
+
+  // JSON escapes the quotes and line breaks of a body, so a trim by raw
+  // length was short, and the queue was serialized once per dropped body.
+  it('trims the outbox to its limit by the serialized size, oldest first', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    status = 503;
+    // About 5.5 MB of bodies full of quotes.
+    for (let i = 0; i < 1100; i++) {
+      enqueue('events', { i, text: '"'.repeat(2500) });
+      flush();
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    const stringify = vi.spyOn(JSON, 'stringify');
+    persistOutbox({ sync: true });
+    // One call per body and one for the queues, not one per dropped body.
+    expect(stringify.mock.calls.length).toBeLessThanOrEqual(pendingCounts().retries + pendingCounts().inFlight + 2);
+    stringify.mockRestore();
+    const raw = storage.get('outbox')!;
+    expect(raw.length).toBeLessThanOrEqual(4_000_000);
+    expect(raw.length).toBeGreaterThan(3_900_000);
+    const box = JSON.parse(raw);
+    // The same text as one JSON.stringify of what is kept.
+    expect(JSON.stringify(box)).toBe(raw);
+    // The newest body is kept.
+    const ids = box.retry.map((r: { body: string }) => JSON.parse(r.body.split('\n')[2])[0].i);
+    expect(Math.max(...ids)).toBe(1099);
+    expect(ids).toEqual([...ids].sort((a, b) => a - b));
+  });
+
   it('sends nothing while sends are held', async () => {
     holdSends(true);
     enqueue('events', { n: 1 });
@@ -413,6 +497,12 @@ describe('transport', () => {
     clearAll();
     expect(pendingCounts().queues.events).toBe(0);
     expect(storage.get('outbox')).toBeNull();
+  });
+
+  // The collector keeps mobile SDK versions apart from browser ones.
+  it('names the SDK in the envelope header', () => {
+    const header = JSON.parse(buildEnvelope([{ type: 'events', items: [{ session_id: 's' }] }]).split('\n')[0]);
+    expect(header).toEqual({ session_id: 's', sdk_name: 'react-native', sdk_version: expect.any(String) });
   });
 
   it('puts the first session id in the envelope header', () => {

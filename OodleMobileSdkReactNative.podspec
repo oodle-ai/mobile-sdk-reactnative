@@ -14,6 +14,8 @@ Pod::Spec.new do |s|
   s.source_files = "ios/**/*.{h,m,mm,swift}"
   s.swift_version = "5.9"
   s.frameworks   = "UIKit", "Network", "QuartzCore"
+  # gzip for uploads (OodleRum.mm).
+  s.libraries    = "z"
   # The ObjC++ module imports the generated Swift header.
   s.pod_target_xcconfig = { "DEFINES_MODULE" => "YES" }
   # The module glue imports C++ headers, so it stays out of the module

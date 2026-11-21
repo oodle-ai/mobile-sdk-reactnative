@@ -84,6 +84,14 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
     }
   }
 
+  /**
+   * Not used on Android: React Native compresses a string body with
+   * Content-Encoding: gzip off the JS thread there (see transport.ts).
+   */
+  override fun postGzip(url: String, headersJson: String, body: String, promise: Promise) {
+    promise.reject("unsupported", "postGzip is used on iOS only")
+  }
+
   private inline fun <T> safe(fallback: T, block: () -> T): T =
     try {
       block()
