@@ -187,19 +187,24 @@ function emitResource(
     data.trace_id = traceId;
     data.span_id = spanId;
   }
-  emit(data);
+  // A request is not user activity: an app that polls would keep its
+  // session open, or start a new one, with nobody using it.
+  emit(data, false);
   // A request the app cancelled did not fail: it is not a network error.
   if (status === 0 && !aborted) {
-    emit({
+    emit(
+      {
       event_type: 'error',
       exception_message: `${method} ${stripQuery(url)} failed: network error`,
       exception_type: 'NetworkError',
       exception_stacktrace: '',
       error_source: 'network',
       error_is_crash: 0,
-      url_full: stripQuery(url),
-      http_request_method: method,
-    });
+        url_full: stripQuery(url),
+        http_request_method: method,
+      },
+      false,
+    );
   }
 }
 

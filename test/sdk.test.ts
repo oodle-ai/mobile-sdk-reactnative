@@ -566,6 +566,38 @@ describe('OodleRum end to end', () => {
     await settle();
   });
 
+  // An app left open on one screen: the view refresh, replay and the
+  // app's own requests run on, and Datadog starts no new session.
+  it('starts no session while the app sits idle, and one at the next tap', async () => {
+    sdk.OodleRum.startView('idle-key', 'Idle');
+    await settle();
+    const before = sdk.OodleRum.getSessionId();
+    expect(before).not.toBe('');
+    uploads.length = 0;
+    // Sixteen idle minutes: view refreshes every 30 s, a request the app
+    // makes by itself, replay captures.
+    for (let m = 0; m < 16; m++) await vi.advanceTimersByTimeAsync(60_000);
+    const poll = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
+    poll.open('GET', 'https://api.example.com/poll');
+    poll.send();
+    await settle();
+    const ids = new Set(all('events').map((e) => e.session_id));
+    expect([...ids].filter((id) => id !== before)).toEqual([]);
+    expect(sdk.OodleRum.getSessionId()).toBe('');
+    // A tap is activity: a new session, linked to the old one, with the
+    // screen the reader is on.
+    uploads.length = 0;
+    sdk.OodleRum.addAction('tap after idle');
+    await settle();
+    const after = sdk.OodleRum.getSessionId();
+    expect(after).not.toBe('');
+    expect(after).not.toBe(before);
+    const first = all('events').filter((e) => e.session_id === after && e.session_is_new === 1);
+    expect(first).toHaveLength(1);
+    expect(first[0].session_previous_id).toBe(before);
+    expect(events('view').some((v) => v.session_id === after && v.app_screen_name === 'Idle')).toBe(true);
+  });
+
   it('starts a new session after stopSession', async () => {
     const before = sdk.OodleRum.getSessionId();
     sdk.OodleRum.stopSession();

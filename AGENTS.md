@@ -64,6 +64,18 @@ keeps these rules (`src/core/transport.ts`):
   JS thread. Android compresses a string body itself. The envelope header
   has `sdk_name: "react-native"` and `sdk_version`.
 
+## Only user activity starts a session
+
+A session ends after 15 minutes without user activity (`SESSION_TIMEOUT_MS`).
+Activity is a tap or other action, a new screen (`startView`), a return to
+the app, or a JS error. Background work (view refreshes, replay, requests
+the app makes by itself, long tasks, console lines, native ANR and hang
+records) passes `activity: false`: it does not keep a session open, and
+once the session has ended its events are dropped (`isSessionExpired`).
+`getSession(false)` never starts a session. When it did, an app left open
+on one screen started a new session every 15 minutes, which Datadog does
+not.
+
 ## Replay is rrweb
 
 Native code returns wireframes; `src/replay/rrweb.ts` turns them into

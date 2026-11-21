@@ -20,11 +20,15 @@ function tick() {
   const blocked = now - expected;
   const threshold = getConfig()?.longTaskThresholdMs ?? 0;
   if (threshold > 0 && blocked >= threshold) {
-    emit({
-      event_type: 'long_task',
-      timestamp: isoTime(now - blocked),
-      long_task_duration_ms: blocked,
-    });
+    // A long task is not user activity.
+    emit(
+      {
+        event_type: 'long_task',
+        timestamp: isoTime(now - blocked),
+        long_task_duration_ms: blocked,
+      },
+      false,
+    );
   }
   expected = now + TICK_MS;
   timer = setTimeout(tick, TICK_MS);

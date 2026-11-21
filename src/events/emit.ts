@@ -4,7 +4,13 @@ import { baseContext } from '../core/context';
 import { uuid } from '../core/ids';
 import { logger } from '../core/logger';
 import { tryConsume } from '../core/rate-limiter';
-import { claimSessionStart, getSession, incrementSessionCount, peekSession } from '../core/session';
+import {
+  claimSessionStart,
+  getSession,
+  incrementSessionCount,
+  isSessionExpired,
+  peekSession,
+} from '../core/session';
 import { incrTelemetry } from '../core/telemetry';
 import {
   EVENTS_BATCH_KEY,
@@ -65,6 +71,8 @@ function markSessionStart(event: EventData) {
 /** Builds an event on the current context and queues it. */
 export function emit(data: EventData, activity = true) {
   if (!canRecord()) return;
+  // Background work does not start a session after the last one ended.
+  if (!activity && isSessionExpired()) return;
   if (!getSession(activity).sampled) return;
   if (isServerRateLimited('events')) return;
   const type = String(data.event_type ?? '');
@@ -92,6 +100,9 @@ export function emit(data: EventData, activity = true) {
  */
 export function emitViewUpdate(data: EventData) {
   if (!canRecord()) return;
+  // A refresh of a view the reader left open does not start a session;
+  // a new screen started one (startView) before it gets here.
+  if (isSessionExpired()) return;
   const session = getSession(false);
   if (!session.sampled) return;
   if (isServerRateLimited('events')) return;

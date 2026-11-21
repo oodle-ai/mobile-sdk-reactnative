@@ -2,10 +2,11 @@ import { getConfig } from '../core/config';
 import { getConsent } from '../core/consent';
 import { hasNative, native } from '../core/native';
 import {
+  type SessionData,
   getSession,
+  isSessionExpired,
   nextReplaySegmentIndex,
   peekSession,
-  type SessionData,
 } from '../core/session';
 import { incrTelemetry } from '../core/telemetry';
 import { REPLAY_BATCH_KEY, enqueue } from '../core/transport';
@@ -106,6 +107,9 @@ function flushSegment(ended?: SessionData | null) {
 
 function push(events: RRWebEvent[]) {
   if (events.length === 0) return;
+  // An idle screen is still captured; the next activity starts a session
+  // and a full snapshot (onReplaySessionRenew).
+  if (isSessionExpired()) return;
   const sessionId = getSession(false).id;
   if (segment.length > 0 && segmentSessionId !== sessionId) flushSegment();
   segmentSessionId = sessionId;

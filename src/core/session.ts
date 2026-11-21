@@ -119,13 +119,21 @@ function renew(now: number): SessionData {
  * work such as periodic view updates passes false so it cannot keep an
  * idle session alive.
  */
+/**
+ * The live session. Only user activity (`activity`: a tap, a new screen,
+ * a return to the app) starts a new one when the last one ended.
+ * Background work (view refreshes, replay, requests the app makes by
+ * itself) gets the ended session and must drop its event
+ * (`isSessionExpired`): an app left open on one screen would otherwise
+ * start a new session every SESSION_TIMEOUT_MS, as Datadog does not.
+ */
 export function getSession(activity = true): SessionData {
   const now = Date.now();
   if (!loaded) {
     loaded = true;
     current = load();
   }
-  if (!current || expired(current, now)) return renew(now);
+  if (!current || (activity && expired(current, now))) return renew(now);
   if (activity) {
     current.lastActivity = now;
     scheduleWrite();
@@ -134,7 +142,7 @@ export function getSession(activity = true): SessionData {
 }
 
 export function getSessionId(): string {
-  return getSession(false).id;
+  return isSessionExpired() ? '' : getSession(false).id;
 }
 
 /** The session as it is now, without starting or renewing one. */
