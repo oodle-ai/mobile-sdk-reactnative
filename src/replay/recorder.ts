@@ -28,6 +28,7 @@ import { clockOffset } from '../core/clock';
 const CAPTURE_INTERVAL_MS = 1000;
 /** Captures after a touch or a screen change, to catch the result and its animation. */
 const FOLLOW_UP_DELAYS_MS = [120, 600];
+const DRAG_FOLLOW_UP_MS = 600;
 /** A full snapshot at least this often, so a seek never replays a long chain. */
 const FULL_SNAPSHOT_EVERY_MS = 5 * 60 * 1000;
 const SEGMENT_MAX_EVENTS = 200;
@@ -35,10 +36,12 @@ const SEGMENT_MAX_BYTES = 60_000;
 const SEGMENT_MAX_AGE_MS = 5000;
 const TOUCH_MOVE_THROTTLE_MS = 50;
 /**
- * A touch that moves further than this (dp) is a drag or a scroll. Its
- * follow-up captures are skipped: a list can still move after the finger
- * lifts, and each capture during that motion costs main thread time when
- * frames matter most. The capture loop records where the motion ends.
+ * A touch that moves further than this (dp) is a drag or a scroll. It
+ * gets one follow-up capture, at DRAG_FOLLOW_UP_MS, not the two of a tap:
+ * a list can still move after the finger lifts, and each capture during
+ * that motion costs main thread time when frames matter most. The one
+ * capture shows where a fling stopped, which the next tick of the loop can
+ * be up to a second late for.
  */
 const DRAG_SLOP_DP = 10;
 const MAX_NODES = 2000;
@@ -161,10 +164,10 @@ async function capture() {
   }
 }
 
-function scheduleFollowUps() {
+function scheduleFollowUps(delays: readonly number[] = FOLLOW_UP_DELAYS_MS) {
   if (!recording) return;
   for (const t of followUps) clearTimeout(t);
-  followUps = FOLLOW_UP_DELAYS_MS.map((d) => setTimeout(() => void capture(), d));
+  followUps = delays.map((d) => setTimeout(() => void capture(), d));
 }
 
 function startLoop() {
@@ -306,7 +309,7 @@ export function recordTouchEnd(x: number, y: number, tap: boolean) {
   const dragged = dragging;
   touchStart = null;
   dragging = false;
-  if (recording && !dragged) scheduleFollowUps();
+  if (recording) scheduleFollowUps(dragged ? [DRAG_FOLLOW_UP_MS] : FOLLOW_UP_DELAYS_MS);
   if (!touchAllowed(x, y)) return;
   const now = Date.now();
   const events: RRWebEvent[] = [

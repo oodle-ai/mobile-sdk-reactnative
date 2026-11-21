@@ -493,16 +493,21 @@ describe('OodleRum end to end', () => {
     expect(events('action').find((a) => a.action_name === 'after replay')!.replay_id).toBe(sdk.OodleRum.getSessionId());
   });
 
-  // A list can still move after a drag; a capture then costs frames.
-  it('captures again after a tap, and not after a drag', async () => {
+  // A list can still move after a drag; a capture then costs frames. One
+  // capture after it shows where a fling stopped.
+  it('captures twice after a tap, and once after a drag', async () => {
     await settle(2000);
     fakeNative.captureWireframes.mockClear();
     recorder.recordTouchStart(100, 200);
     recorder.recordTouchMove(100, 260);
     recorder.recordTouchEnd(100, 320, false);
-    await vi.advanceTimersByTimeAsync(700);
-    // At most the capture loop's own capture.
+    await vi.advanceTimersByTimeAsync(590);
+    // No capture at 120 ms: at most the capture loop's own.
     expect(fakeNative.captureWireframes.mock.calls.length).toBeLessThanOrEqual(1);
+    fakeNative.captureWireframes.mockClear();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeGreaterThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(100);
     fakeNative.captureWireframes.mockClear();
     recorder.recordTouchStart(100, 200);
     recorder.recordTouchEnd(102, 201, true);
