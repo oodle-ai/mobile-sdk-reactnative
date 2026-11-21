@@ -8,6 +8,26 @@ final class WireframeWalker {
   private static let privacyPrefix = "oodle-privacy-"
   /// Walks longer than this stop early, to keep frames from dropping.
   private static let timeBudget: CFTimeInterval = 0.04
+  /// A drawing is drawn again at most this often.
+  private static let pictureRefresh: CFTimeInterval = 2
+  /// A larger drawing is a placeholder: its picture would be too big to send.
+  private static let pictureMaxPoints: CGFloat = 640
+  private static let pictureMaxScale: CGFloat = 2
+  /// The last picture of each drawing, so an unchanged one is not drawn
+  /// and encoded on every capture.
+  private static let pictures = NSMapTable<UIView, Picture>.weakToStrongObjects()
+
+  private final class Picture {
+    let key: String
+    let data: String
+    let at: CFTimeInterval
+
+    init(key: String, data: String, at: CFTimeInterval) {
+      self.key = key
+      self.data = data
+      self.at = at
+    }
+  }
 
   private let maxNodes: Int
   private var nodes: [[String: Any]] = []
@@ -80,7 +100,22 @@ final class WireframeWalker {
   private func isLeaf(_ view: UIView) -> Bool {
     if view is UITextField || view is UITextView || view is UISwitch || view is UIImageView { return true }
     let name = NSStringFromClass(type(of: view))
-    return name.contains("WKWebView") || name.contains("Paragraph")
+    return name.contains("WKWebView") || name.contains("Paragraph") || isVector(view)
+  }
+
+  /// A react-native-svg drawing. Its shapes are views of their own, which
+  /// the picture of the drawing already shows.
+  private func isVector(_ view: UIView) -> Bool {
+    NSStringFromClass(type(of: view)) == "RNSVGSvgView"
+  }
+
+  /// Text that is a glyph of an icon font (@expo/vector-icons and the
+  /// like): characters of the Private Use Area, or an emoji. The replay has
+  /// no copy of the font, so the glyph is sent as a picture.
+  static func isIconGlyph(_ text: String) -> Bool {
+    let units = Array(text.utf16)
+    if units.isEmpty || units.count > 4 { return false }
+    return units.allSatisfy { (0xE000...0xF8FF).contains($0) || UTF16.isLeadSurrogate($0) || UTF16.isTrailSurrogate($0) }
   }
 
   /// React Native keeps the `nativeID` prop as `nativeId` (Fabric) or
@@ -95,7 +130,7 @@ final class WireframeWalker {
   private func describe(_ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?) -> [String: Any]? {
     let name = NSStringFromClass(type(of: view))
     let (bg, radius) = background(view)
-    let borderWidth = view.layer.borderWidth
+    let borderWidth = border(view)?.width ?? 0
 
     if let field = view as? UITextField {
       var n = box(view, kind: "in", rect: rect, visible: visible, alpha: alpha)
@@ -124,6 +159,10 @@ final class WireframeWalker {
     }
     if let label = view as? UILabel {
       let text = label.text ?? ""
+      if Self.isIconGlyph(text) {
+        let color = label.textColor.map(css) ?? ""
+        return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: "\(text)|\(color)")
+      }
       if text.isEmpty && bg == nil { return nil }
       var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
       style(&n, bg: bg, radius: radius, view: view)
@@ -136,6 +175,9 @@ final class WireframeWalker {
     }
     if name.contains("Paragraph") {
       return paragraph(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, bg: bg, radius: radius)
+    }
+    if isVector(view) {
+      return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: nil)
     }
     if view is UIImageView || name.contains("ImageComponentView") || name.contains("RCTImageView") {
       var n = box(view, kind: "i", rect: rect, visible: visible, alpha: alpha)
@@ -163,6 +205,10 @@ final class WireframeWalker {
       attributed = view.perform(selector)?.takeUnretainedValue() as? NSAttributedString
     }
     let text = attributed?.string ?? ""
+    if let attributed = attributed, Self.isIconGlyph(text) {
+      let color = (attributed.attributes(at: 0, effectiveRange: nil)[.foregroundColor] as? UIColor).map(css) ?? ""
+      return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: "\(text)|\(color)")
+    }
     if text.isEmpty && bg == nil { return nil }
     var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
     style(&n, bg: bg, radius: radius, view: view)
@@ -176,27 +222,185 @@ final class WireframeWalker {
         font: attrs[.font] as? UIFont,
         alignment: paragraphStyle?.alignment ?? .natural
       )
+      if let kern = attrs[.kern] as? NSNumber, kern.doubleValue != 0 {
+        n["ls"] = round(kern.doubleValue)
+      }
+      if let laid = deviceLines(attributed, size: view.bounds.size) {
+        n["tx"] = laid.lines
+        n["ln"] = true
+        n["lh"] = round(Double(laid.lineHeight))
+      }
       if let privacy = privacy { n["pv"] = privacy }
     }
+    return n
+  }
+
+  /// The lines of a paragraph as the device breaks them. The replay draws
+  /// text in a web font, which is wider or narrower than the app's: it
+  /// broke the lines again, and a line that wrapped fell below the box and
+  /// was cut off ("Ava · Driver" showed as "Ava ·"). Sent with `ln`, the
+  /// replay draws these lines as they are. React Native lays its text out
+  /// with TextKit in the view's size, as this does.
+  ///
+  /// Gives the lines and the height of the first, or nil when the text
+  /// does not lay out.
+  private func deviceLines(_ attributed: NSAttributedString, size: CGSize) -> (lines: String, lineHeight: CGFloat)? {
+    guard size.width > 0 else { return nil }
+    let wrapped = NSMutableAttributedString(attributedString: attributed)
+    // A truncating line break mode lays each paragraph out on one line.
+    // React Native truncates at the line count, not by the mode.
+    wrapped.enumerateAttribute(.paragraphStyle, in: NSRange(location: 0, length: wrapped.length)) { value, range, _ in
+      guard let style = value as? NSParagraphStyle, style.lineBreakMode != .byWordWrapping,
+            let copy = style.mutableCopy() as? NSMutableParagraphStyle
+      else { return }
+      copy.lineBreakMode = .byWordWrapping
+      wrapped.addAttribute(.paragraphStyle, value: copy, range: range)
+    }
+    let storage = NSTextStorage(attributedString: wrapped)
+    let manager = NSLayoutManager()
+    // Half a point of room: the view's width is rounded to the pixel
+    // grid, which can be a little less than the text measured.
+    let container = NSTextContainer(size: CGSize(width: size.width + 0.5, height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 0
+    manager.addTextContainer(container)
+    storage.addLayoutManager(manager)
+    let text = wrapped.string as NSString
+    var lines: [String] = []
+    var firstHeight: CGFloat = 0
+    manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) { rect, _, _, glyphs, stop in
+      // Lines below the view are the ones React Native cut at its line count.
+      if !lines.isEmpty && rect.minY >= size.height - 0.5 {
+        stop.pointee = true
+        return
+      }
+      let chars = manager.characterRange(forGlyphRange: glyphs, actualGlyphRange: nil)
+      var line = text.substring(with: chars)
+      while let last = line.unicodeScalars.last, CharacterSet.whitespacesAndNewlines.contains(last) {
+        line.unicodeScalars.removeLast()
+      }
+      lines.append(line)
+      if firstHeight == 0 { firstHeight = rect.height }
+    }
+    if lines.isEmpty || firstHeight <= 0 { return nil }
+    return (lines.joined(separator: "\n"), firstHeight)
+  }
+
+  /// A drawing as a PNG, at most twice its size in points: a
+  /// react-native-svg drawing, or a glyph of an icon font. Drawings and
+  /// icons are the app's own graphics, not user content, so they are
+  /// recorded as they are; a mask or a hidden tag over them still applies.
+  ///
+  /// `content` names what the view draws, when it is known (an icon's
+  /// glyph and color): the picture is then drawn again only when that
+  /// changes. A react-native-svg drawing has no such name and is drawn
+  /// again at most every `pictureRefresh`.
+  private func picture(
+    _ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?, content: String?
+  ) -> [String: Any] {
+    var n = box(view, kind: "v", rect: rect, visible: visible, alpha: alpha)
+    if privacy == "mask" { return n }
+    let size = view.bounds.size
+    if size.width > Self.pictureMaxPoints || size.height > Self.pictureMaxPoints { return n }
+    let key = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))|\(content ?? "")"
+    let now = CACurrentMediaTime()
+    if let cached = Self.pictures.object(forKey: view), cached.key == key,
+       content != nil || now - cached.at < Self.pictureRefresh {
+      n["img"] = cached.data
+      return n
+    }
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = min(view.window?.screen.scale ?? 2, Self.pictureMaxScale)
+    format.opaque = false
+    let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
+      view.layer.render(in: context.cgContext)
+    }
+    guard let png = image.pngData() else { return n }
+    let data = "data:image/png;base64," + png.base64EncodedString()
+    Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
+    n["img"] = data
     return n
   }
 
   /// Background color and corner radius. Newer React Native versions draw
   /// the background in a sublayer, so that layer is checked too.
   private func background(_ view: UIView) -> (UIColor?, CGFloat) {
+    let radius = cornerRadius(view)
     if let color = view.backgroundColor, color.cgColor.alpha > 0.01 {
-      return (color, view.layer.cornerRadius)
+      return (color, radius)
     }
     if let cg = view.layer.backgroundColor, cg.alpha > 0.01 {
-      return (UIColor(cgColor: cg), view.layer.cornerRadius)
+      return (UIColor(cgColor: cg), radius)
     }
-    for layer in view.layer.sublayers ?? [] {
-      if let cg = layer.backgroundColor, cg.alpha > 0.01,
-         abs(layer.frame.width - view.bounds.width) < 1, abs(layer.frame.height - view.bounds.height) < 1 {
-        return (UIColor(cgColor: cg), max(layer.cornerRadius, view.layer.cornerRadius))
+    for layer in drawingLayers(view) {
+      if let cg = layer.backgroundColor, cg.alpha > 0.01 {
+        return (UIColor(cgColor: cg), radius)
       }
     }
-    return (nil, view.layer.cornerRadius)
+    return (nil, radius)
+  }
+
+  /// The layers the size of the view that draw for the view itself, not
+  /// for a subview. React Native draws there what a layer of its own
+  /// cannot: a background with uneven corners, and a border that does not
+  /// clip the content (`_backgroundColorLayer`, `_borderLayer`).
+  private func drawingLayers(_ view: UIView) -> [CALayer] {
+    (view.layer.sublayers ?? []).filter { layer in
+      !(layer.delegate is UIView)
+        && abs(layer.frame.width - view.bounds.width) < 1
+        && abs(layer.frame.height - view.bounds.height) < 1
+    }
+  }
+
+  /// The corner radius. When React Native draws the border in a layer of
+  /// its own, the view's radius is 0, and the radius is on that layer and
+  /// on the background layer.
+  private func cornerRadius(_ view: UIView) -> CGFloat {
+    if view.layer.cornerRadius > 0 { return view.layer.cornerRadius }
+    return drawingLayers(view).map(\.cornerRadius).max() ?? 0
+  }
+
+  /// The border's width and color: the view's own, or the one React
+  /// Native drew into its border layer as an image. That image is the
+  /// border of a small box, stretched to the view, so the width is the run
+  /// of drawn pixels from the left edge of its middle row, and the color
+  /// is the first of them.
+  private func border(_ view: UIView) -> (width: CGFloat, color: UIColor?)? {
+    if view.layer.borderWidth > 0 {
+      return (view.layer.borderWidth, view.layer.borderColor.map { UIColor(cgColor: $0) })
+    }
+    for layer in drawingLayers(view) {
+      guard let contents = layer.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { continue }
+      if let drawn = imageBorder(contents as! CGImage, scale: layer.contentsScale) { return drawn }
+    }
+    return nil
+  }
+
+  private func imageBorder(_ image: CGImage, scale: CGFloat) -> (width: CGFloat, color: UIColor?)? {
+    let w = image.width
+    let h = image.height
+    guard w > 0, h > 0, w * h <= 512 * 512 else { return nil }
+    var px = [UInt8](repeating: 0, count: w * h * 4)
+    let drawn: Bool = px.withUnsafeMutableBytes { buffer in
+      guard let ctx = CGContext(
+        data: buffer.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+        space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ) else { return false }
+      ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+      return true
+    }
+    guard drawn else { return nil }
+    let row = h / 2
+    func alpha(_ x: Int) -> UInt8 { px[(row * w + x) * 4 + 3] }
+    var run = 0
+    while run < w / 2 && alpha(run) > 0 { run += 1 }
+    guard run > 0 else { return nil }
+    let i = row * w * 4
+    let a = CGFloat(px[i + 3]) / 255
+    let color = UIColor(
+      red: min(CGFloat(px[i]) / 255 / a, 1), green: min(CGFloat(px[i + 1]) / 255 / a, 1),
+      blue: min(CGFloat(px[i + 2]) / 255 / a, 1), alpha: a
+    )
+    return (CGFloat(run) / max(scale, 1), color)
   }
 
   private func isSensitive(_ field: UITextField) -> Bool {
@@ -238,10 +442,9 @@ final class WireframeWalker {
   private func style(_ n: inout [String: Any], bg: UIColor?, radius: CGFloat, view: UIView) {
     if let bg = bg { n["bg"] = css(bg) }
     if radius > 0 { n["r"] = round(Double(radius)) }
-    let width = view.layer.borderWidth
-    if width > 0 {
-      n["bw"] = round(Double(width))
-      if let color = view.layer.borderColor { n["bc"] = css(UIColor(cgColor: color)) }
+    if let drawn = border(view), drawn.width > 0 {
+      n["bw"] = round(Double(drawn.width))
+      if let color = drawn.color { n["bc"] = css(color) }
     }
   }
 
@@ -249,13 +452,27 @@ final class WireframeWalker {
     if let color = color { n["tc"] = css(color) }
     if let font = font {
       n["fs"] = round(Double(font.pointSize))
-      if font.fontDescriptor.symbolicTraits.contains(.traitBold) { n["fw"] = 700 }
+      let weight = cssWeight(font)
+      if weight != 400 { n["fw"] = weight }
     }
     switch alignment {
     case .center: n["ta"] = "center"
     case .right: n["ta"] = "right"
     default: break
     }
+  }
+
+  /// The CSS weight of a font, from its weight trait (semibold is 600, not
+  /// bold), or from the bold trait when the font has no weight.
+  private func cssWeight(_ font: UIFont) -> Int {
+    let traits = font.fontDescriptor.object(forKey: .traits) as? [UIFontDescriptor.TraitKey: Any]
+    if let weight = (traits?[.weight] as? NSNumber).map({ CGFloat($0.doubleValue) }) {
+      let scale: [(CGFloat, Int)] = [
+        (-0.8, 100), (-0.6, 200), (-0.4, 300), (0, 400), (0.23, 500), (0.3, 600), (0.4, 700), (0.56, 800), (0.62, 900),
+      ]
+      return scale.min { abs($0.0 - weight) < abs($1.0 - weight) }!.1
+    }
+    return font.fontDescriptor.symbolicTraits.contains(.traitBold) ? 700 : 400
   }
 
   /// UIColor to CSS #rrggbbaa.
