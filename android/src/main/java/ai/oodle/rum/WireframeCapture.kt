@@ -84,6 +84,8 @@ object WireframeCapture {
     val startedAt: Long,
   ) {
     val nodes = JSONArray()
+    /** Visible areas of OodlePrivacy mask views, [x, y, w, h] in dp. Touches there are not recorded. */
+    val masks = JSONArray()
     var truncated = false
     val loc = IntArray(2)
     /** Views to visit, last on top. Children go on in reverse, so the walk is in draw order. */
@@ -181,6 +183,7 @@ object WireframeCapture {
       out.put("height", height)
       out.put("nodes", w.nodes)
       if (w.truncated) out.put("truncated", true)
+      if (w.masks.length() > 0) out.put("masks", w.masks)
       worker.execute {
         val text =
           try {
@@ -250,7 +253,17 @@ object WireframeCapture {
           w.nodes.put(box(view, "h", rect, visible, w, alpha))
           return
         }
-        "mask" -> pv = "mask"
+        "mask" -> {
+          pv = "mask"
+          val d = w.density
+          w.masks.put(
+            JSONArray()
+              .put(round(visible.left / d))
+              .put(round(visible.top / d))
+              .put(round(visible.width() / d))
+              .put(round(visible.height() / d)),
+          )
+        }
         "allow" -> pv = "allow"
       }
     }

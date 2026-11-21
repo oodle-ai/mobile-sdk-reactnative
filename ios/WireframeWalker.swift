@@ -86,6 +86,9 @@ final class WireframeWalker {
 
   private let maxNodes: Int
   private var nodes: [[String: Any]] = []
+  /// Visible areas of OodlePrivacy mask views, [x, y, w, h] in points.
+  /// Touches there are not recorded.
+  private var masks: [[Double]] = []
   private var truncated = false
   /// Views to visit, last on top. Children go on in reverse, so the walk
   /// is in draw order.
@@ -143,6 +146,7 @@ final class WireframeWalker {
       "nodes": nodes,
     ]
     if truncated { out["truncated"] = true }
+    if !masks.isEmpty { out["masks"] = masks }
     return out
   }
 
@@ -166,7 +170,12 @@ final class WireframeWalker {
       case "hidden":
         nodes.append(box(view, kind: "h", rect: rect, visible: visible, alpha: alpha))
         return
-      case "mask": pv = "mask"
+      case "mask":
+        pv = "mask"
+        masks.append([
+          round(Double(visible.minX)), round(Double(visible.minY)),
+          round(Double(visible.width)), round(Double(visible.height)),
+        ])
       case "allow": pv = "allow"
       default: break
       }

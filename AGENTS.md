@@ -57,6 +57,12 @@ keeps these rules (`src/core/transport.ts`):
   (`holdSends`): the crash is on disk, and a send just before the process
   ends would be sent again by the next start.
 - A crash (`error_is_crash: 1`) is never rate limited.
+- The outbox of the last run is read after the first frame
+  (`deferRestoreOutbox`). A write before that reads it first, so the file
+  is never replaced unread. A crash queued at start is written at once.
+- On iOS native code compresses and posts each body (`postGzip`), off the
+  JS thread. Android compresses a string body itself. The envelope header
+  has `sdk_name: "react-native"` and `sdk_version`.
 
 ## Replay is rrweb
 
@@ -66,6 +72,15 @@ applied in TypeScript, from the native privacy flags (`pv`, `sen`).
 `test/rrweb.test.ts` replays the events with rrweb's own `Replayer` and
 compares the result with a fresh full snapshot; keep it passing when the
 diff changes. rrweb-snapshot is pinned to the version the frontend uses.
+
+- rrweb builds an added node without its `childNodes`: a mutation adds
+  each child (text, picture) on its own.
+- The picture of a drawing is a child element, so a move does not send it
+  again. One event carries at most `PICTURE_BUDGET_CHARS` of new pictures.
+- A `truncated` snapshot is partial: views after its last shared view are
+  kept, not removed.
+- Native walks run in slices of a few ms on the main thread, with a total
+  budget; the result is serialized off the main thread.
 
 ## Native code
 

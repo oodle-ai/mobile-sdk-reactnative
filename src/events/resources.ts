@@ -103,6 +103,8 @@ export function installResourceTracking() {
 
     const start = now();
     let reported = false;
+    // The app cancelled the request (abort fires before loadend).
+    let aborted = false;
     const done = () => {
       if (reported) return;
       reported = true;
@@ -116,9 +118,12 @@ export function installResourceTracking() {
         // header access can throw after an abort
       }
       const type = this.responseType === 'blob' ? 'fetch' : 'xhr';
-      emitResource(info.method, info.url, status, duration, size, type, traceId, spanId);
+      emitResource(info.method, info.url, status, duration, size, type, traceId, spanId, aborted);
     };
     try {
+      this.addEventListener('abort', () => {
+        aborted = true;
+      });
       this.addEventListener('loadend', done);
     } catch {
       // older XHR without addEventListener: fall back to readyState
@@ -167,6 +172,7 @@ function emitResource(
   type: string,
   traceId: string,
   spanId: string,
+  aborted = false,
 ) {
   const data: Record<string, unknown> = {
     event_type: 'resource',
@@ -182,7 +188,8 @@ function emitResource(
     data.span_id = spanId;
   }
   emit(data);
-  if (status === 0) {
+  // A request the app cancelled did not fail: it is not a network error.
+  if (status === 0 && !aborted) {
     emit({
       event_type: 'error',
       exception_message: `${method} ${stripQuery(url)} failed: network error`,
@@ -285,11 +292,18 @@ function installFetchTracking() {
         return res;
       },
       (err: unknown) => {
-        emitResource(method, url, 0, Math.round(now() - start), 0, 'fetch', traceId, spanId);
+        emitResource(method, url, 0, Math.round(now() - start), 0, 'fetch', traceId, spanId, isAbort(err, args));
         throw err;
       },
     );
   } as Fetch;
+}
+
+/** True when a fetch failed because the app aborted it (AbortController). */
+function isAbort(err: unknown, init: Record<string, unknown> | undefined): boolean {
+  if (err && typeof err === 'object' && (err as { name?: unknown }).name === 'AbortError') return true;
+  const signal = init?.signal as { aborted?: unknown } | undefined;
+  return signal?.aborted === true;
 }
 
 export function uninstallResourceTracking() {

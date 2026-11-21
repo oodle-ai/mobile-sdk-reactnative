@@ -1,4 +1,5 @@
 import { useEffect } from 'react';
+import { logger } from '../core/logger';
 import { OodleRum } from '../rum';
 
 /** The parts of a react-navigation container ref the SDK uses. */
@@ -29,13 +30,44 @@ export interface NavigationTrackingOptions {
   viewName?: (route: { key: string; name: string }) => string | null;
 }
 
+/** How often, and how long, the hook looks for a container that is not mounted yet. */
+const FIND_INTERVAL_MS = 200;
+const FIND_TRIES = 300;
+
 /**
  * Starts a view for each screen the navigator shows. Returns a function
  * that stops tracking.
+ *
+ * A ref from useRef() is empty until the NavigationContainer mounts, and
+ * the container can mount after the effect that calls this (after a
+ * splash screen or a sign-in). Tracking then never started; now the ref
+ * is looked at again until it is set, for up to a minute.
  */
 export function trackNavigation(ref: NavigationRefLike, options: NavigationTrackingOptions = {}): () => void {
-  const nav = container(ref);
-  if (!nav) return () => {};
+  let detach: (() => void) | null = null;
+  const attach = () => {
+    const nav = container(ref);
+    if (nav) detach = trackContainer(nav, options);
+    return nav !== null;
+  };
+  if (attach()) return () => detach?.();
+  let tries = 0;
+  let find: ReturnType<typeof setInterval> | null = setInterval(() => {
+    tries++;
+    if (attach() || tries >= FIND_TRIES) {
+      if (find) clearInterval(find);
+      find = null;
+      if (!detach) logger.warn('The navigation ref was never set; screens are not tracked');
+    }
+  }, FIND_INTERVAL_MS);
+  return () => {
+    if (find) clearInterval(find);
+    find = null;
+    detach?.();
+  };
+}
+
+function trackContainer(nav: NavigationContainerLike, options: NavigationTrackingOptions): () => void {
   const update = () => {
     const route = nav.getCurrentRoute();
     if (!route) return;
