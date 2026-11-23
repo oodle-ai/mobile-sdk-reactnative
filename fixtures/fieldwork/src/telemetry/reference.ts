@@ -16,7 +16,7 @@ import {
   TextAndInputPrivacyLevel,
   TouchPrivacyLevel,
 } from '@datadog/mobile-react-native-session-replay';
-import { apiHost, collectorUrl, referenceConfig } from '../config';
+import { apiHost, collectorUrl, referenceConfig, referenceProbe } from '../config';
 import type { Telemetry } from './types';
 
 let enabled = false;
@@ -38,7 +38,9 @@ export const reference: Telemetry = {
         site: referenceConfig.site,
         service: 'fieldwork-one-mobile',
         version: '1.0.0',
-        verbosity: SdkVerbosity.WARN,
+        // The replay probe reads the debug log to see what the SDK records
+        // and uploads.
+        verbosity: referenceProbe ? SdkVerbosity.DEBUG : SdkVerbosity.WARN,
         // Small, frequent uploads to the mock collector let the CI
         // scenarios check that the reference SDK also reported a crash, while the
         // Oodle SDK was installed next to it.
@@ -46,9 +48,10 @@ export const reference: Telemetry = {
         batchSize: BatchSize.SMALL,
         // The mock collector is plain HTTP. On Android, the reference SDK sends
         // only over TLS unless this is set; iOS does not read it.
-        additionalConfiguration: { '_dd.needsClearTextHttp': true },
+        // The replay probe sends to the SDK's own servers.
+        ...(referenceProbe ? {} : { additionalConfiguration: { '_dd.needsClearTextHttp': true } }),
         rumConfiguration: {
-          customEndpoint: `${collectorUrl}/reference/rum`,
+          ...(referenceProbe ? {} : { customEndpoint: `${collectorUrl}/reference/rum` }),
           applicationId: referenceConfig.applicationId,
           trackInteractions: true,
           useAccessibilityLabel: true,
@@ -70,7 +73,7 @@ export const reference: Telemetry = {
     await SessionReplay.enable({
       replaySampleRate: 100,
       // The mock collector measures the replay uploads of both SDKs.
-      customEndpoint: `${collectorUrl}/reference/replay`,
+      ...(referenceProbe ? {} : { customEndpoint: `${collectorUrl}/reference/replay` }),
       textAndInputPrivacyLevel: TextAndInputPrivacyLevel.MASK_ALL_INPUTS,
       imagePrivacyLevel: ImagePrivacyLevel.MASK_ALL,
       touchPrivacyLevel: TouchPrivacyLevel.SHOW,
