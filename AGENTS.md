@@ -3,6 +3,8 @@
 React Native RUM SDK for Oodle. TypeScript does the work; the native
 module (`android/`, `ios/`) only does what JS cannot.
 
+You are the owner and long-term maintainer of this codebase, and its design is up to you.
+
 ## The wire contract is the browser SDK's
 
 The SDK posts the browser SDK's NDJSON envelope to `/v1/rum/ingest`, and
