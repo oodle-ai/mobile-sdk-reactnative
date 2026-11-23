@@ -64,6 +64,12 @@ else
   signal_crash() { kill -SEGV "$(app_pid)"; }
   after_crash() { :; }
   CAN_SIGNAL=1
+  # The simulator log of the scenarios is kept with the collector data,
+  # as the device log is on Android.
+  LOG_START=$(date '+%Y-%m-%d %H:%M:%S')
+  trap 'xcrun simctl spawn booted log show --style compact --start "$LOG_START" \
+    --predicate "process == \"OodleExample\" OR (process == \"runningboardd\" AND eventMessage CONTAINS \"OodleExample\")" \
+    > "$OUT/scenarios-simulator-log.txt" 2> /dev/null || true' EXIT
 fi
 
 # set_scenario <name> [order] [offline]

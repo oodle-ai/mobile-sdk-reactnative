@@ -445,7 +445,9 @@ async function sendBody(item: RetryItem): Promise<void> {
   const gen = generation;
   try {
     const sentAt = Date.now();
+    logger.debug('send', item.id.slice(0, 8), item.body.length);
     const res = await post(`${config.endpoint}${INGEST_PATH}`, headers(item), item.body);
+    logger.debug('answer', item.id.slice(0, 8), res.status, Date.now() - sentAt);
     if (gen !== generation) {
       // Consent was withdrawn while the body was sent.
       inFlight.delete(item);
@@ -475,7 +477,8 @@ async function sendBody(item: RetryItem): Promise<void> {
       inFlight.delete(item);
       syncOutboxAfterSend();
     }
-  } catch {
+  } catch (e) {
+    logger.debug('send failed', item.id.slice(0, 8), e);
     inFlight.delete(item);
     if (gen !== generation) return;
     incrTelemetry('send_failures');

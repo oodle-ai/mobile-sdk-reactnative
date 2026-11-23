@@ -13,6 +13,13 @@ DEVICE=$(xcrun simctl list devices available -j |
   python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for r in d.values() for x in r if x['name'].startswith('iPhone')))")
 xcrun simctl boot "$DEVICE"
 xcrun simctl bootstatus "$DEVICE" -b
+# The simulator log of the run is kept with the collector data: the app's
+# own lines (the SDK logs at debug in the fixture), and the lines of
+# runningboardd, which suspends and resumes the app.
+LOG_START=$(date '+%Y-%m-%d %H:%M:%S')
+trap 'xcrun simctl spawn "$DEVICE" log show --style compact --start "$LOG_START" \
+  --predicate "process == \"OodleExample\" OR (process == \"runningboardd\" AND eventMessage CONTAINS \"OodleExample\")" \
+  > "$OUT/simulator-log.txt" 2> /dev/null || true' EXIT
 # The install took from 1 to 7 minutes in CI. The times show which
 # step takes long.
 echo "$(date -u +%T) install"

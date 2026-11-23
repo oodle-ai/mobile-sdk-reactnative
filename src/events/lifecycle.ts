@@ -1,6 +1,7 @@
 import { AppState, Platform, type AppStateStatus, type NativeEventSubscription } from 'react-native';
 import { refreshConnectivity, saveLastContext } from '../core/context';
 import { flushSession, isSessionExpired } from '../core/session';
+import { logger } from '../core/logger';
 import { flush, persistOutbox } from '../core/transport';
 import { canRecord, emit } from './emit';
 import { drainNativeEvents } from './errors';
@@ -74,6 +75,7 @@ function toForeground() {
 }
 
 function onChange(state: AppStateStatus) {
+  logger.debug('app state', state);
   if (!canRecord()) return;
   // iOS reports 'inactive' for the app switcher and system sheets; the
   // app is still on screen, so only 'background' counts as leaving.
