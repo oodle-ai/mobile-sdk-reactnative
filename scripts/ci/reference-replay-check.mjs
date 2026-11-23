@@ -5,6 +5,10 @@
 // session.has_replay and _dd.replay_stats.records_count. The servers index
 // events after a short time, so it asks again for up to WAIT_MS.
 //
+// When the device log of the probe shows no upload (probe.json in --out:
+// the SDK sent nothing, or its log was lost), this check gives the
+// verdict, and fails when the servers have no session of the launch.
+//
 // Environment:
 //   REFERENCE_PROBE_API_HOST  the API host of the account's site
 //   REFERENCE_PROBE_API_KEY   an API key
@@ -24,14 +28,24 @@ export function field(event, name) {
   return name.split('.').reduce((v, k) => (v && typeof v === 'object' ? v[k] : undefined), attrs);
 }
 
-/** What the views of one session say about its replay. */
+/**
+ * What the views of one session say about its replay. `records` is null
+ * when no view has the record count: the search API does not always return
+ * the field.
+ */
 export function replayOfViews(views) {
-  const records = views.map((v) => Number(field(v, '_dd.replay_stats.records_count') ?? 0));
+  const counts = views.map((v) => field(v, '_dd.replay_stats.records_count')).filter((c) => c !== undefined);
   return {
     views: views.length,
     hasReplay: views.some((v) => field(v, 'session.has_replay') === true),
-    records: records.reduce((a, b) => a + b, 0),
+    records: counts.length ? counts.reduce((a, b) => a + Number(b), 0) : null,
   };
+}
+
+/** The verdict when the device log of the probe showed no upload. */
+export function serverVerdict(found) {
+  if (!found) return 'probe broken: no upload in the device log, and no session on the servers';
+  return found.hasReplay ? 'recorded (from the servers)' : 'not recorded (from the servers)';
 }
 
 /** The API host, without a scheme or a path. */
@@ -57,11 +71,21 @@ async function search(host, query) {
   return (await res.json()).data ?? [];
 }
 
+const args = process.argv.slice(2);
+const opt = (n) => (args.includes(`--${n}`) ? args[args.indexOf(`--${n}`) + 1] : undefined);
+const out = path.resolve(opt('out') ?? '.');
+
+/** True when the device log of the probe showed no upload: only this check can give the verdict. */
+function decides() {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(out, 'probe.json'), 'utf8')).verdict === 'no upload in the device log';
+  } catch {
+    return false; // Run on its own, without a probe.
+  }
+}
+
 async function main() {
-  const args = process.argv.slice(2);
-  const opt = (n) => (args.includes(`--${n}`) ? args[args.indexOf(`--${n}`) + 1] : undefined);
   const launch = opt('launch');
-  const out = path.resolve(opt('out') ?? '.');
   if (!launch) throw new Error('--launch is required');
   fs.mkdirSync(out, { recursive: true });
   const report = (lines) => {
@@ -70,9 +94,15 @@ async function main() {
     if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `${md}\n`);
     console.log(md);
   };
+  // When this check gives the verdict, it fails when it cannot.
+  const verdict = decides();
+  const fail = (lines) => {
+    report(verdict ? [...lines, '', `**Verdict: ${serverVerdict(undefined)}**`] : lines);
+    if (verdict) process.exitCode = 1;
+  };
   const host = apiHost(process.env.REFERENCE_PROBE_API_HOST);
   if (!host || !process.env.REFERENCE_PROBE_API_KEY || !process.env.REFERENCE_PROBE_APP_KEY) {
-    report(['Not checked: REFERENCE_PROBE_API_HOST, REFERENCE_PROBE_API_KEY and REFERENCE_PROBE_APP_KEY are not all set.']);
+    fail(['Not checked: REFERENCE_PROBE_API_HOST, REFERENCE_PROBE_API_KEY and REFERENCE_PROBE_APP_KEY are not all set.']);
     return;
   }
   const deadline = Date.now() + WAIT_MS;
@@ -83,7 +113,7 @@ async function main() {
     if (!session) await new Promise((r) => setTimeout(r, 20_000));
   }
   if (!session) {
-    report([`No session with the action \`scenario:${launch}\` within ${WAIT_MS / 60_000} minutes.`]);
+    fail([`No session with the action \`scenario:${launch}\` within ${WAIT_MS / 60_000} minutes.`]);
     return;
   }
   // The views keep their replay state up to date; wait for the last updates.
@@ -93,13 +123,16 @@ async function main() {
   report([
     '| Session | Views | session.has_replay | Replay records |',
     '|---|---|---|---|',
-    `| \`${session}\` | ${r.views} | ${r.hasReplay} | ${r.records} |`,
+    `| \`${session}\` | ${r.views} | ${r.hasReplay} | ${r.records ?? 'not returned'} |`,
+    ...(verdict ? ['', `**Verdict: ${serverVerdict(r)}**`] : []),
   ]);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   main().catch((e) => {
-    // The check confirms the probe; it does not fail the job.
+    // The check confirms the probe; it fails the job only when it must give the verdict.
     console.error(`The server check did not run: ${e.message}`);
+    // Without the check, a probe with no upload in its device log has no verdict.
+    if (decides()) process.exitCode = 1;
   });
 }

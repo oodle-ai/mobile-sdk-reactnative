@@ -14,9 +14,11 @@
 # comes from the debug log of the SDK on the device:
 #   recorded      the SDK uploaded at least one replay segment
 #   not recorded  the SDK uploaded RUM data, and no replay segment
-# The probe fails only when the SDK uploaded nothing at all: then the probe
-# itself is broken, not replay. scripts/ci/reference-replay-check.mjs can
-# confirm the verdict from what the SDK's servers stored.
+#   no upload in the device log
+#                 the log shows no upload: the SDK sent nothing, or its log
+#                 was lost. scripts/ci/reference-replay-check.mjs then gives
+#                 the verdict from what the SDK's servers stored, and fails
+#                 the job when they have nothing.
 #
 # Usage: reference-replay-probe.sh android|ios <apk or .app> <output dir>
 # Environment: PROBE_NAME (default probe-local), SIMULATOR (iOS),
@@ -45,7 +47,7 @@ done
 # scenario; a probe build has it on already (REFERENCE_PROBE_*).
 scenario() {
   curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$(printf \
-    '{"name":"%s","provider":"reference","replay":true,"seed":7,"steps":12,"debug":true}' "$1")" > /dev/null
+    '{"name":"%s","provider":"%s","replay":true,"seed":7,"steps":12,"debug":true}' "$1" "${2:-reference}")" > /dev/null
 }
 
 LOG="$OUT/device-log.txt"
@@ -59,13 +61,23 @@ if [ "$PLATFORM" = android ]; then
 else
   xcrun simctl install "$SIM" "$APP"
   # On iOS the SDK prints its debug log to the app's standard output.
+  # NSUnbufferedIO writes each line at once (Xcode sets it too): a
+  # buffered line is lost when the app is ended.
   launch() {
-    xcrun simctl launch --terminate-running-process --stdout="$OUT/stdout-$1.txt" \
+    SIMCTL_CHILD_NSUnbufferedIO=YES \
+      xcrun simctl launch --terminate-running-process --stdout="$OUT/stdout-$1.txt" \
       --stderr="$OUT/stderr-$1.txt" "$SIM" "$BUNDLE" > /dev/null
   }
 fi
 
 clear_app_data
+# The first start after an install can take longer than the 2 s that the
+# app waits for its scenario; it then runs no scenario and sends no
+# "scenario:" action. A warm-up start with no SDK takes that time.
+scenario "warmup-${PROBE_NAME:-probe-local}" none
+launch 0
+sleep 15
+kill_app
 scenario "$NAME"
 launch 1
 sleep 35
@@ -107,7 +119,7 @@ if [ "$replay_ok" -gt 0 ]; then
 elif [ "$rum_ok" -gt 0 ]; then
   verdict='not recorded'
 else
-  verdict='probe broken'
+  verdict='no upload in the device log'
 fi
 
 {
@@ -122,11 +134,9 @@ fi
   case "$verdict" in
     recorded) echo "The replay of the reference SDK records here. If the comparison runs still get no replay from it, the cause is their mock setup (custom endpoint, plain HTTP or placeholder credentials), not the SDK." ;;
     'not recorded') echo "The SDK sent RUM data and no replay segment: its replay records nothing, also with its own servers. The entry in scripts/compare/parity-allowlist.json stays." ;;
-    *) echo "The SDK sent nothing: check the credentials and the device log in the artifact." ;;
+    *) echo "The device log shows no upload. The server check below gives the verdict." ;;
   esac
 } | tee "$OUT/probe.md" >> "${GITHUB_STEP_SUMMARY:-/dev/null}"
 cat "$OUT/probe.md"
 printf '{"platform":"%s","launch":"%s","verdict":"%s","replay_ok":%d,"replay_failed":%d,"rum_ok":%d}\n' \
   "$PLATFORM" "$NAME" "$verdict" "$replay_ok" "$replay_failed" "$rum_ok" > "$OUT/probe.json"
-
-[ "$verdict" != 'probe broken' ]

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 // @ts-expect-error: a plain JS module of the CI scripts.
-import { apiHost, field, replayOfViews } from '../scripts/ci/reference-replay-check.mjs';
+import { apiHost, field, replayOfViews, serverVerdict } from '../scripts/ci/reference-replay-check.mjs';
 
 // What scripts/ci/reference-replay-check.mjs reads from the RUM search API.
 const view = (attrs: Record<string, unknown>) => ({ attributes: { attributes: attrs } });
@@ -27,5 +27,13 @@ describe('replay probe server check', () => {
       view({ session: { has_replay: true } }),
     ];
     expect(replayOfViews(some)).toEqual({ views: 3, hasReplay: true, records: 12 });
+    // The search API does not always return the record count.
+    expect(replayOfViews([view({ session: { has_replay: true } })])).toEqual({ views: 1, hasReplay: true, records: null });
+  });
+
+  it('gives the verdict when the device log showed no upload', () => {
+    expect(serverVerdict({ views: 6, hasReplay: true, records: null })).toBe('recorded (from the servers)');
+    expect(serverVerdict({ views: 6, hasReplay: false, records: null })).toBe('not recorded (from the servers)');
+    expect(serverVerdict(undefined)).toMatch(/^probe broken/);
   });
 });
