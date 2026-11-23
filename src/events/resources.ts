@@ -3,15 +3,26 @@ import { INTERNAL_REQUEST } from '../core/internal';
 import { newTraceIds, tracingHeaders } from '../core/tracing';
 import { emit } from './emit';
 
+interface Trace {
+  traceId: string;
+  spanId: string;
+}
+
+const NO_TRACE: Trace = { traceId: '', spanId: '' };
+
 interface TrackedXHR {
   [INTERNAL_REQUEST]?: boolean;
   /** The XHR of a fetch call, which the fetch wrapper records. */
   __oodleFetch?: boolean;
+  /** The trace of the XHR of a fetch call, for the fetch wrapper. */
+  __oodleTrace?: Trace;
   __oodle?: {
     method: string;
     url: string;
     headers: Map<string, string>;
   };
+  /** The request context of the reference SDK's XHR tracking (@datadog/mobile-react-native). */
+  _datadog_xhr?: { tracingAttributes?: { tracingStrategy?: string } };
 }
 
 type XHRProto = {
@@ -35,13 +46,42 @@ let originalFetch: Fetch | null = null;
  * opened then belongs to a fetch that this module already records.
  */
 let fetchDepth = 0;
+/** The XHR that the fetch call in progress opened, if it opened one. */
+let fetchXhr: XMLHttpRequest | null = null;
+/**
+ * True when a fetch call of the app opened an XHR. React Native's own
+ * fetch (whatwg-fetch) also marks itself with `polyfill`; a fetch that
+ * another library wraps does not, so the first call shows it.
+ */
+let fetchOpenedXhr = false;
+
+/** True when the app's fetch runs on XHR, so its requests are traced on their XHR. */
+function fetchRunsOnXhr(): boolean {
+  return fetchOpenedXhr || (originalFetch as unknown as { polyfill?: unknown } | null)?.polyfill === true;
+}
+
+/**
+ * True when the reference SDK's XHR tracking will add its own trace headers to this
+ * request. It adds them on send and does not check for headers that are
+ * already set, so a request that Oodle also traced would carry two
+ * traceparents. Oodle then adds none, and records the reference SDK's trace.
+ */
+function referenceTraces(xhr: TrackedXHR): boolean {
+  const strategy = xhr._datadog_xhr?.tracingAttributes?.tracingStrategy;
+  return typeof strategy === 'string' && strategy !== 'DISCARD';
+}
+
+/** The trace of the traceparent that a request carries, when it is sampled. */
+function traceOf(headers: Map<string, string>): Trace {
+  const parent = parseTraceparent(headers.get('traceparent') ?? '');
+  return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId } : NO_TRACE;
+}
 
 function now(): number {
   const p = (globalThis as unknown as { performance?: { now?: () => number } }).performance;
   return typeof p?.now === 'function' ? p.now() : Date.now();
 }
 
-/** The URL without query string or fragment, which can hold tokens. */
 /** The trace of a W3C `traceparent` header (version 00), or null. */
 export function parseTraceparent(
   value: string,
@@ -51,9 +91,59 @@ export function parseTraceparent(
   return { traceId: m[1].toLowerCase(), spanId: m[2].toLowerCase(), sampled: (parseInt(m[3], 16) & 1) === 1 };
 }
 
+/** The URL without query string or fragment. */
 export function stripQuery(url: string): string {
   const cut = url.search(/[?#]/);
   return cut >= 0 ? url.slice(0, cut) : url;
+}
+
+/** Above this length, a text body counts as one byte for each character. */
+const MAX_COUNTED_CHARS = 1_000_000;
+
+/** The UTF-8 size of a string in bytes, without a copy of it. */
+export function utf8Bytes(s: string): number {
+  if (s.length > MAX_COUNTED_CHARS) return s.length;
+  let n = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c < 0x80) n += 1;
+    else if (c < 0x800) n += 2;
+    else if (c >= 0xd800 && c <= 0xdbff && i + 1 < s.length) {
+      // A surrogate pair is one character of 4 bytes.
+      n += 4;
+      i++;
+    } else n += 3;
+  }
+  return n;
+}
+
+/**
+ * The size of the response body in bytes, as the reference SDK gives it: the
+ * Content-Length header, or else the size of the body that the XHR read.
+ * A chunked or compressed response has no Content-Length. A `json` or
+ * `document` body is not measured: a copy to measure it costs more than
+ * the value is worth.
+ */
+function xhrResponseSize(xhr: XMLHttpRequest): number {
+  try {
+    const len = parseInt(xhr.getResponseHeader?.('content-length') ?? '', 10);
+    if (len > 0) return len;
+    const body = xhr.response as { size?: unknown; byteLength?: unknown } | null;
+    switch (xhr.responseType) {
+      case '':
+      case 'text':
+        return typeof xhr.responseText === 'string' ? utf8Bytes(xhr.responseText) : 0;
+      case 'blob':
+        return typeof body?.size === 'number' ? body.size : 0;
+      case 'arraybuffer':
+        return typeof body?.byteLength === 'number' ? body.byteLength : 0;
+      default:
+        return 0;
+    }
+  } catch {
+    // The body or a header can throw after an abort.
+    return 0;
+  }
 }
 
 function isCollectorUrl(url: string): boolean {
@@ -81,7 +171,10 @@ export function installResourceTracking() {
     const method = typeof args[0] === 'string' ? args[0].toUpperCase() : 'GET';
     const url = typeof args[1] === 'string' ? args[1] : String(args[1] ?? '');
     this.__oodle = { method, url, headers: new Map<string, string>() };
-    if (fetchDepth > 0) this.__oodleFetch = true;
+    if (fetchDepth > 0) {
+      this.__oodleFetch = true;
+      fetchXhr = this as unknown as XMLHttpRequest;
+    }
     return orig.open.apply(this, args);
   };
 
@@ -93,13 +186,36 @@ export function installResourceTracking() {
   proto.send = function (this: TrackedXHR & XMLHttpRequest, body?: unknown) {
     const info = this.__oodle;
     const config = getConfig();
-    if (!info || this[INTERNAL_REQUEST] || this.__oodleFetch || !config || isCollectorUrl(info.url)) {
+    if (!info || this[INTERNAL_REQUEST] || !config || isCollectorUrl(info.url)) {
       return orig.send.call(this, body);
     }
 
-    const { traceId, spanId } = traceRequest(info.url, info.headers, (k, v) =>
-      orig.setRequestHeader.call(this, k, v),
-    );
+    // Trace headers go on the XHR, also for a fetch that runs on XHR: here
+    // the headers that another SDK sets on the XHR are seen. When the reference SDK
+    // will add its own, Oodle adds none and reads the reference SDK's after it set
+    // them: before the send when the reference SDK's tracking wraps Oodle's, in the
+    // send when Oodle's wraps the reference SDK's (it sets them through the
+    // setRequestHeader above).
+    const reference = referenceTraces(this);
+    let trace = reference
+      ? NO_TRACE
+      : traceRequest(info.url, info.headers, (k, v) => orig.setRequestHeader.call(this, k, v));
+    const send = () => {
+      try {
+        return orig.send.call(this, body);
+      } finally {
+        if (reference) trace = traceOf(info.headers);
+      }
+    };
+
+    if (this.__oodleFetch) {
+      // The fetch wrapper records this request, with this trace.
+      try {
+        return send();
+      } finally {
+        this.__oodleTrace = trace;
+      }
+    }
 
     const start = now();
     let reported = false;
@@ -110,15 +226,7 @@ export function installResourceTracking() {
       reported = true;
       const status = this.status || 0;
       const duration = Math.round(now() - start);
-      let size = 0;
-      try {
-        const len = this.getResponseHeader?.('content-length');
-        if (len) size = parseInt(len, 10) || 0;
-      } catch {
-        // header access can throw after an abort
-      }
-      const type = this.responseType === 'blob' ? 'fetch' : 'xhr';
-      emitResource(info.method, info.url, status, duration, size, type, traceId, spanId, aborted);
+      emitResource(info.method, info.url, status, duration, xhrResponseSize(this), 'xhr', trace.traceId, trace.spanId, aborted);
     };
     try {
       this.addEventListener('abort', () => {
@@ -133,7 +241,7 @@ export function installResourceTracking() {
         if (prev) return (prev as (e: Event) => unknown).call(this, ev);
       } as XMLHttpRequest['onreadystatechange'];
     }
-    return orig.send.call(this, body);
+    return send();
   };
 }
 
@@ -176,7 +284,9 @@ function emitResource(
 ) {
   const data: Record<string, unknown> = {
     event_type: 'resource',
-    url_full: stripQuery(url),
+    // The URL as the app requested it, with its query string, as in
+    // Other mobile RUM SDKs. An app removes tokens from it in beforeSend.
+    url_full: url,
     http_request_method: method,
     http_response_status_code: status,
     resource_duration_ms: duration,
@@ -195,12 +305,14 @@ function emitResource(
     emit(
       {
       event_type: 'error',
+      // The message has no query string, so that the errors of one
+      // endpoint group together. The full URL is in url_full.
       exception_message: `${method} ${stripQuery(url)} failed: network error`,
       exception_type: 'NetworkError',
       exception_stacktrace: '',
       error_source: 'network',
       error_is_crash: 0,
-        url_full: stripQuery(url),
+        url_full: url,
         http_request_method: method,
       },
       false,
@@ -262,11 +374,17 @@ function installFetchTracking() {
     const { url, method, headers } = fetchRequest(input, init);
     if (!config || !url || isCollectorUrl(url)) return call(init);
 
+    // A fetch that runs on XHR gets its trace headers on its XHR (the XHR
+    // hook above). Only a fetch that does not, as Expo's native fetch, gets
+    // them here.
+    const onXhr = fetchRunsOnXhr();
     const map = headerMap(headers);
     const added: Record<string, string> = {};
-    const { traceId, spanId } = traceRequest(url, map, (k, v) => {
-      added[k] = v;
-    });
+    const fetchTrace = onXhr
+      ? NO_TRACE
+      : traceRequest(url, map, (k, v) => {
+          added[k] = v;
+        });
     let args = init;
     if (Object.keys(added).length > 0) {
       // A copy of the headers with the trace headers added; the app's own
@@ -278,13 +396,27 @@ function installFetchTracking() {
     }
 
     const start = now();
+    // React Native's own fetch opens an XHR during the call. Expo's native
+    // fetch does not. As in the reference SDK, a request that runs on XHR is an
+    // `xhr` resource, and its size comes from the body that the XHR read.
+    fetchXhr = null;
     let pending: Promise<FetchResponse>;
+    let xhr: XMLHttpRequest | null = null;
     try {
       pending = call(args);
+      xhr = fetchXhr;
     } catch (e) {
-      emitResource(method, url, 0, Math.round(now() - start), 0, 'fetch', traceId, spanId);
+      xhr = fetchXhr;
+      const t = (xhr as TrackedXHR | null)?.__oodleTrace ?? fetchTrace;
+      emitResource(method, url, 0, Math.round(now() - start), 0, xhr ? 'xhr' : 'fetch', t.traceId, t.spanId);
       throw e;
+    } finally {
+      fetchXhr = null;
     }
+    if (xhr) fetchOpenedXhr = true;
+    const type = xhr ? 'xhr' : 'fetch';
+    // The trace that the request carries: from its XHR, or added here.
+    const trace = () => (xhr as TrackedXHR | null)?.__oodleTrace ?? fetchTrace;
     return pending.then(
       (res) => {
         let size = 0;
@@ -293,11 +425,12 @@ function installFetchTracking() {
         } catch {
           // a response without readable headers
         }
-        emitResource(method, url, res?.status ?? 0, Math.round(now() - start), size, 'fetch', traceId, spanId);
+        if (!size && xhr) size = xhrResponseSize(xhr);
+        emitResource(method, url, res?.status ?? 0, Math.round(now() - start), size, type, trace().traceId, trace().spanId);
         return res;
       },
       (err: unknown) => {
-        emitResource(method, url, 0, Math.round(now() - start), 0, 'fetch', traceId, spanId, isAbort(err, args));
+        emitResource(method, url, 0, Math.round(now() - start), 0, type, trace().traceId, trace().spanId, isAbort(err, args));
         throw err;
       },
     );
@@ -312,6 +445,7 @@ function isAbort(err: unknown, init: Record<string, unknown> | undefined): boole
 }
 
 export function uninstallResourceTracking() {
+  fetchOpenedXhr = false;
   if (originalFetch) {
     (globalThis as unknown as { fetch?: Fetch }).fetch = originalFetch;
     originalFetch = null;

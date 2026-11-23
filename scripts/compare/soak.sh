@@ -25,6 +25,7 @@
 #   SEED      seed of the first launch; launch n uses SEED+n (default 1)
 #   STEPS     steps of each walk (default 12)
 #   ROUND     a label for this run, in the scenario names (default 1)
+#   REFERENCE_DEBUG  1 starts the reference SDK with its debug log, in the device log
 set -euo pipefail
 PLATFORM="${1:?android|ios}"
 OUT="${2:?collector dir}"
@@ -44,13 +45,14 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 LAUNCH_SECONDS=$((8 + (STEPS * 12 + 9) / 10))
 PREFIX="$PROVIDER-$REPLAY-r$ROUND"
 REPLAY_JSON=$([ "$REPLAY" = off ] && echo false || echo true)
+DEBUG_JSON=$([ "${REFERENCE_DEBUG:-0}" = 1 ] && echo true || echo false)
 LAUNCHES_FILE="$OUT/launches.ndjson"
 ENDS=(background return kill)
 
 set_scenario() {
   curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$(printf \
-    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d}' \
-    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS")" > /dev/null
+    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s}' \
+    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON")" > /dev/null
 }
 
 # The number of walks of this run that ended and reached the collector,

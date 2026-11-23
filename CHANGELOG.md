@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+### Changes that alter the counts
+
+- A request that runs on XMLHttpRequest is a resource of type `xhr`, as
+  in the reference SDK. This includes `fetch` calls in React Native, which
+  run on XMLHttpRequest. Only a `fetch` that does not (Expo's native
+  fetch) is of type `fetch`. Before, a `fetch` call was always of type
+  `fetch`, and an XHR that read a blob was too.
+- `http_response_body_size` is the size of the body that the request
+  read when the response has no `Content-Length` (a chunked or
+  compressed response), as in the reference SDK. Before, it was 0. A
+  `json` or `document` body is not measured.
+
+### Tracing
+
+- With another RUM SDK in the same app whose XHR tracking adds its trace
+  headers without a check for headers that are already set, a request
+  carries one `traceparent`. When that SDK traces a request, Oodle now
+  adds none and records its trace, so both SDKs link the same backend
+  trace. Before, each `fetch` call, and each XHR when the other SDK was
+  set up first, carried two traceparents, and the two SDKs linked
+  different traces.
+- A `fetch` that runs on XMLHttpRequest (React Native's own fetch) gets
+  its trace headers on its XHR, not in the fetch call, so the headers that
+  other SDKs set on the XHR are seen.
+
+### Privacy
+
+- `url_full` of a resource and of a network error is the URL as the app
+  requested it, with its query string, as in other mobile RUM SDKs.
+  Before, the SDK removed the query string and fragment. If your URLs can
+  hold tokens or personal data, remove them in `beforeSend` (see the
+  README). The message of a network error still has no query string.
+
 ## 0.1.4
 
 ### Changes that alter the counts

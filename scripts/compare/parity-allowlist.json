@@ -1,1 +1,8 @@
-[]
+[
+  {
+    "check": "replay (reference)",
+    "platform": "android",
+    "replay": "on",
+    "reason": "the reference SDK's Android Session Replay records nothing in the fixture: replay_stats.records_count is 0 on every view, also with the reference SDK alone and without R8. The cause is not found yet."
+  }
+]
