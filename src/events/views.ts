@@ -2,7 +2,7 @@ import { getConfig } from '../core/config';
 import { saveLastContext, viewUrlFor } from '../core/context';
 import { uuid } from '../core/ids';
 import { getDeviceInfo, native, type NativeVitals } from '../core/native';
-import { getSession } from '../core/session';
+import { getSession, isSessionExpired, peekSession } from '../core/session';
 import { attributesJSON, canRecord, emitViewUpdate, setViewCounter, type EventData } from './emit';
 import { setCurrentViewInfo, type ViewInfo } from './view-state';
 import { isoTime } from '../core/clock';
@@ -47,8 +47,11 @@ interface ActiveView extends ViewInfo {
 }
 
 let active: ActiveView | null = null;
-/** The view to restart when the app returns to the foreground. */
-let paused: { key: string; name: string; attributes?: Record<string, unknown> } | null = null;
+/**
+ * The view the app left when it went to the background. It goes on when
+ * the app returns (`resumeViews`), as one view, as the reference SDK counts it.
+ */
+let paused: ActiveView | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
 let throttleTimer: ReturnType<typeof setTimeout> | null = null;
 let firstViewSeen = false;
@@ -119,6 +122,14 @@ function round(n: number, digits: number): number {
   return Math.round(n * f) / f;
 }
 
+/**
+ * Time since the view started, the time in the background included, as
+ * The reference SDK counts it for a view the app returns to.
+ */
+function timeSpentMs(v: ActiveView, now: number): number {
+  return Math.max(0, now - v.startMs);
+}
+
 function send(v: ActiveView, final: boolean) {
   collectVitals();
   v.seq++;
@@ -133,7 +144,7 @@ function send(v: ActiveView, final: boolean) {
     view_update_seq: v.seq,
     view_is_active: final ? 0 : 1,
     view_start: isoTime(v.startMs),
-    view_time_spent_ms: Math.max(0, now - v.startMs),
+    view_time_spent_ms: timeSpentMs(v, now),
     view_action_count: v.actionCount,
     view_error_count: v.errorCount,
     view_resource_count: v.resourceCount,
@@ -229,6 +240,12 @@ export function startView(
     if (active.key === key) return;
     stopView(active.key);
   }
+  // A new screen ends the view the app left in the background.
+  if (paused) {
+    const left = paused;
+    paused = null;
+    send(left, true);
+  }
   const viewName = name || key;
   const { url, path } = viewUrlFor(viewName);
   // Start or renew the session first, so a renewal cannot restart the
@@ -254,7 +271,6 @@ export function startView(
     vitals: emptyVitals(),
   };
   active = view;
-  paused = null;
   setCurrentViewInfo(view);
   send(view, false);
   saveLastContext();
@@ -273,6 +289,12 @@ export function startView(
 }
 
 export function stopView(key?: string) {
+  if (!active && paused && (key === undefined || paused.key === key)) {
+    const left = paused;
+    paused = null;
+    send(left, true);
+    return;
+  }
   if (!active || (key !== undefined && active.key !== key)) return;
   const v = active;
   active = null;
@@ -315,19 +337,43 @@ export function addViewAttributes(attrs: Record<string, unknown>) {
   active.attributes = { ...(active.attributes ?? {}), ...attrs };
 }
 
-/** Ends the view while the app is in the background, so time away is not counted. */
+/**
+ * Holds the view while the app is in the background. Its time so far is
+ * sent now: the OS can end a background app.
+ * The update keeps the view open (view_is_active 1). A view's last update
+ * closes it, and readers take a view's vitals from its closing update, so
+ * a view closed here and again later would count twice.
+ */
 export function pauseViews() {
   if (!active) return;
-  paused = { key: active.key, name: active.name, attributes: active.attributes };
-  stopView(active.key);
+  const v = active;
+  send(v, false);
+  paused = v;
+  active = null;
+  stopRefreshTimer();
 }
 
-/** Starts the paused view again as a new view instance. */
+/**
+ * The app is back: the view it left goes on, with its id and start, as
+ * The reference SDK does. When the session ended while the app was away, a new view
+ * starts, which starts the new session.
+ */
 export function resumeViews() {
   if (!paused || active) return;
-  const p = paused;
+  const v = paused;
   paused = null;
-  startView(p.key, p.name, p.attributes);
+  if (isSessionExpired() || peekSession()?.id !== v.sessionId) {
+    startView(v.key, v.name, v.attributes);
+    return;
+  }
+  // A return to the app is activity, and the vitals of the time away are
+  // not the view's.
+  getSession(true);
+  if (getConfig()?.vitals) native.collectVitals();
+  active = v;
+  setCurrentViewInfo(v);
+  send(v, false);
+  ensureRefreshTimer();
 }
 
 /** Session ended: the open view belongs to the old session. */

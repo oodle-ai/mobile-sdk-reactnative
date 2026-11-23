@@ -106,6 +106,28 @@ function isPressable(f: FiberLike): boolean {
   return typeof role === 'string' && BUTTON_ROLES.has(role) && typeof f.type !== 'string';
 }
 
+function hasHandler(f: FiberLike): boolean {
+  const p = props(f);
+  return HANDLER_PROPS.some((h) => typeof p[h] === 'function');
+}
+
+/**
+ * The component that owns the press handler, from the fiber found
+ * pressable up to a few levels above it: Pressable, TouchableOpacity,
+ * Button, and so on, as the reference SDK names a tap. Pressable passes its role to
+ * the View it renders, and that View is found first, so the name was
+ * "View" for every Pressable.
+ */
+function handlerOwner(from: FiberLike): FiberLike {
+  let f: FiberLike | null | undefined = from;
+  for (let i = 0; f && i < 6; i++, f = f.return) {
+    if (typeof f.type === 'string' || !hasHandler(f)) continue;
+    const n = fiberName(f);
+    if (n && !GENERIC_HOSTS.has(n)) return f;
+  }
+  return from;
+}
+
 function stringProp(p: Record<string, unknown>, key: string): string {
   const v = p[key];
   return typeof v === 'string' && v.trim() ? v.trim() : '';
@@ -172,7 +194,7 @@ export function resolveTapTarget(
   }
 
   const target = pressable ?? start;
-  let component = fiberName(target);
+  let component = fiberName(pressable ? handlerOwner(pressable) : target);
   if (!component || GENERIC_HOSTS.has(component)) {
     component = pressable ? component || 'Touchable' : 'View';
   }

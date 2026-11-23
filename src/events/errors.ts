@@ -232,7 +232,8 @@ export function installConsoleTracking() {
       if (!inConsole && !(typeof args[0] === 'string' && args[0].startsWith(LOG_PREFIX))) {
         inConsole = true;
         try {
-          emit({ event_type: 'console', console_level: level, console_message: consoleText(args) });
+          // A log line is not user activity.
+          emit({ event_type: 'console', console_level: level, console_message: consoleText(args) }, false);
         } catch {
           // ignore
         } finally {
@@ -301,12 +302,16 @@ export function reportPendingCrash() {
   });
 }
 
-/** Turns ANR and hang records from the native watchdog into error events. */
+/**
+ * Turns ANR and hang records from the native watchdog into error events.
+ * A blocked main thread is not user activity: it neither keeps a session
+ * open nor starts one.
+ */
 export function drainNativeEvents() {
   for (const e of native.drainNativeEvents()) {
     if (e.type === 'anr' || e.type === 'app_hang') {
       const anr = e.type === 'anr';
-      emit({
+      const event = {
         event_type: 'error',
         timestamp: isoTime(e.timestamp),
         exception_message:
@@ -320,16 +325,18 @@ export function drainNativeEvents() {
         error_is_crash: 0,
         error_handling: 'unhandled',
         long_task_duration_ms: e.duration_ms ?? 0,
-      });
+      };
+      emit(event, false);
     } else if (e.type === 'memory_warning') {
-      emit({
+      const event = {
         event_type: 'error',
         timestamp: isoTime(e.timestamp),
         exception_message: e.message || 'Memory warning',
         exception_type: 'MemoryWarning',
         error_source: 'native',
         error_is_crash: 0,
-      });
+      };
+      emit(event, false);
     }
   }
 }

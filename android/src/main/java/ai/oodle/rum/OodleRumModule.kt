@@ -64,9 +64,13 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
 
   override fun startWatchdog(thresholdMs: Double): Boolean = safe(false) { Watchdog.start(thresholdMs.toLong()) }
 
+  override fun stopWatchdog(): Boolean = safe(false) { Watchdog.stop() }
+
   override fun drainNativeEvents(): String = safe("[]") { NativeEvents.drain() }
 
   override fun startVitals(): Boolean = safe(false) { Vitals.start(reactApplicationContext) }
+
+  override fun stopVitals(): Boolean = safe(false) { Vitals.stop() }
 
   override fun collectVitals(): String = safe("{}") { Vitals.collect() }
 
@@ -75,12 +79,21 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
   override fun captureWireframes(optionsJson: String, promise: Promise) {
     val options = safe(JSONObject()) { JSONObject(optionsJson) }
     UiThreadUtil.runOnUiThread {
+      val reject = { t: Throwable -> promise.reject("capture_failed", t.message ?: t.javaClass.name, t) }
       try {
-        promise.resolve(WireframeCapture.capture(reactApplicationContext.currentActivity, options))
+        WireframeCapture.capture(reactApplicationContext.currentActivity, options, { promise.resolve(it) }, reject)
       } catch (t: Throwable) {
-        promise.reject("capture_failed", t.message ?: t.javaClass.name, t)
+        reject(t)
       }
     }
+  }
+
+  /**
+   * Not used on Android: React Native compresses a string body with
+   * Content-Encoding: gzip off the JS thread there (see transport.ts).
+   */
+  override fun postGzip(url: String, headersJson: String, body: String, promise: Promise) {
+    promise.reject("unsupported", "postGzip is used on iOS only")
   }
 
   private inline fun <T> safe(fallback: T, block: () -> T): T =

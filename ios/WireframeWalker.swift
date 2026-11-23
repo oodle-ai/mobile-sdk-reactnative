@@ -6,16 +6,37 @@ import UIKit
 /// masking. Must run on the main thread.
 final class WireframeWalker {
   private static let privacyPrefix = "oodle-privacy-"
-  /// Walks longer than this stop early, to keep frames from dropping.
-  private static let timeBudget: CFTimeInterval = 0.04
-  /// A drawing is drawn again at most this often.
-  private static let pictureRefresh: CFTimeInterval = 2
+  /// Main thread time of one slice of a walk. The walk gives the main
+  /// thread back between slices, so frames can draw while it goes on.
+  private static let sliceBudget: CFTimeInterval = 0.004
+  /// Main thread time of all slices of one walk. A longer walk stops
+  /// ("truncated").
+  private static let walkBudget: CFTimeInterval = 0.04
+  /// A walk that takes longer than this, in slices, stops. The screen
+  /// keeps changing.
+  private static let maxWallTime: CFTimeInterval = 1
+  /// A drawing without a known content (react-native-svg) is drawn again
+  /// at most this often. Its content cannot be read, so it is drawn to see.
+  private static let pictureRefresh: CFTimeInterval = 5
+  /// A picture with more pixels than this is encoded on a background
+  /// queue: a large PNG can take tens of ms. A small one (an icon) is
+  /// encoded at once, so it is in the snapshot that first shows it.
+  private static let pictureSyncPixels: CGFloat = 128 * 128
+  private static let encodeQueue = DispatchQueue(label: "ai.oodle.rum.picture", qos: .utility)
+  /// Drawings whose picture is encoded now. Main thread only.
+  private static let encoding = NSHashTable<UIView>.weakObjects()
   /// A larger drawing is a placeholder: its picture would be too big to send.
   private static let pictureMaxPoints: CGFloat = 640
   private static let pictureMaxScale: CGFloat = 2
   /// The last picture of each drawing, so an unchanged one is not drawn
   /// and encoded on every capture.
   private static let pictures = NSMapTable<UIView, Picture>.weakToStrongObjects()
+  /// The last device lines of each paragraph. TextKit layout of every
+  /// text on every walk was a large part of its time.
+  private static let lines = NSMapTable<UIView, Lines>.weakToStrongObjects()
+  /// The border read from each view's border image. Reading it draws the
+  /// image into a buffer.
+  private static let borders = NSMapTable<UIView, ImageBorder>.weakToStrongObjects()
 
   private final class Picture {
     let key: String
@@ -29,59 +50,137 @@ final class WireframeWalker {
     }
   }
 
+  private final class Lines {
+    let text: NSAttributedString
+    let size: CGSize
+    let result: (lines: String, lineHeight: CGFloat)?
+
+    init(text: NSAttributedString, size: CGSize, result: (lines: String, lineHeight: CGFloat)?) {
+      self.text = text
+      self.size = size
+      self.result = result
+    }
+  }
+
+  private final class ImageBorder {
+    /// Held so that a new image cannot reuse its address.
+    let image: CGImage
+    let scale: CGFloat
+    let result: (width: CGFloat, color: UIColor?)?
+
+    init(image: CGImage, scale: CGFloat, result: (width: CGFloat, color: UIColor?)?) {
+      self.image = image
+      self.scale = scale
+      self.result = result
+    }
+  }
+
+  /// A view still to visit, with what its parents give it.
+  private struct Item {
+    let view: UIView
+    let window: UIWindow
+    let clip: CGRect
+    let alpha: CGFloat
+    let privacy: String?
+  }
+
   private let maxNodes: Int
   private var nodes: [[String: Any]] = []
+  /// Visible areas of OodlePrivacy mask views, [x, y, w, h] in points.
+  /// Touches there are not recorded.
+  private var masks: [[Double]] = []
   private var truncated = false
-  private var deadline: CFTimeInterval = 0
+  /// Views to visit, last on top. Children go on in reverse, so the walk
+  /// is in draw order.
+  private var stack: [Item] = []
+  private var spent: CFTimeInterval = 0
+  private var startedAt: CFTimeInterval = 0
+  private var screen: CGRect = .zero
+  private var started = false
 
   init(maxNodes: Int) {
     self.maxNodes = maxNodes
   }
 
-  func capture() -> [String: Any] {
-    deadline = CACurrentMediaTime() + Self.timeBudget
-    let windows = UIApplication.shared.connectedScenes
-      .compactMap { $0 as? UIWindowScene }
-      .flatMap { $0.windows }
-      .filter { !$0.isHidden && $0.alpha > 0.01 && $0.bounds.width > 0 }
-      .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
-    guard let main = windows.first(where: { $0.isKeyWindow }) ?? windows.first else {
-      return ["width": 0, "height": 0, "nodes": []]
+  /// Runs one slice of the walk on the main thread. Returns true when the
+  /// walk is done; call `result()` then. Otherwise call again on a later
+  /// turn of the main queue, so frames can draw between slices.
+  func step() -> Bool {
+    let sliceStart = CACurrentMediaTime()
+    if !started {
+      started = true
+      startedAt = sliceStart
+      let windows = UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap { $0.windows }
+        .filter { !$0.isHidden && $0.alpha > 0.01 && $0.bounds.width > 0 }
+        .sorted { $0.windowLevel.rawValue < $1.windowLevel.rawValue }
+      guard let main = windows.first(where: { $0.isKeyWindow }) ?? windows.first else { return true }
+      screen = main.bounds
+      for window in windows.reversed() {
+        stack.append(Item(view: window, window: window, clip: screen, alpha: 1, privacy: nil))
+      }
     }
-    let screen = main.bounds
-    for window in windows {
-      walk(window, window: window, clip: screen, alpha: 1, privacy: nil)
+    while let item = stack.popLast() {
+      let now = CACurrentMediaTime()
+      if nodes.count >= maxNodes || spent + (now - sliceStart) > Self.walkBudget || now - startedAt > Self.maxWallTime {
+        truncated = true
+        stack.removeAll()
+        break
+      }
+      if now - sliceStart >= Self.sliceBudget {
+        stack.append(item)
+        spent += now - sliceStart
+        return false
+      }
+      visit(item)
     }
+    return true
+  }
+
+  func result() -> [String: Any] {
+    if screen.width <= 0 { return ["width": 0, "height": 0, "nodes": []] }
     var out: [String: Any] = [
       "width": round(Double(screen.width)),
       "height": round(Double(screen.height)),
       "nodes": nodes,
     ]
     if truncated { out["truncated"] = true }
+    if !masks.isEmpty { out["masks"] = masks }
     return out
   }
 
-  private func walk(_ view: UIView, window: UIWindow, clip: CGRect, alpha parentAlpha: CGFloat, privacy: String?) {
-    if nodes.count >= maxNodes || CACurrentMediaTime() > deadline {
-      truncated = true
+  private func visit(_ item: Item) {
+    let view = item.view
+    // The walk runs in slices: a view can leave the screen between them.
+    // A window has no window of its own, so it is checked by itself.
+    if let window = view as? UIWindow {
+      if window.isHidden || window.windowScene == nil { return }
+    } else if view.window == nil {
       return
     }
     if view.isHidden || view.bounds.width <= 0 || view.bounds.height <= 0 { return }
-    let alpha = parentAlpha * view.alpha
+    let alpha = item.alpha * view.alpha
     if alpha <= 0.01 { return }
+    let window = item.window
     var rect = view.convert(view.bounds, to: window)
     rect.origin.x += window.frame.origin.x
     rect.origin.y += window.frame.origin.y
-    let visible = rect.intersection(clip)
+    let visible = rect.intersection(item.clip)
     if visible.isNull || visible.isEmpty { return }
 
-    var pv = privacy
+    var pv = item.privacy
     if let id = nativeId(view), id.hasPrefix(Self.privacyPrefix) {
       switch String(id.dropFirst(Self.privacyPrefix.count)) {
       case "hidden":
         nodes.append(box(view, kind: "h", rect: rect, visible: visible, alpha: alpha))
         return
-      case "mask": pv = "mask"
+      case "mask":
+        pv = "mask"
+        masks.append([
+          round(Double(visible.minX)), round(Double(visible.minY)),
+          round(Double(visible.width)), round(Double(visible.height)),
+        ])
       case "allow": pv = "allow"
       default: break
       }
@@ -91,9 +190,9 @@ final class WireframeWalker {
       nodes.append(node)
     }
     if isLeaf(view) { return }
-    let childClip = (view.clipsToBounds || view is UIScrollView) ? visible : clip
-    for child in view.subviews {
-      walk(child, window: window, clip: childClip, alpha: alpha, privacy: pv)
+    let childClip = (view.clipsToBounds || view is UIScrollView) ? visible : item.clip
+    for child in view.subviews.reversed() {
+      stack.append(Item(view: child, window: window, clip: childClip, alpha: alpha, privacy: pv))
     }
   }
 
@@ -129,12 +228,15 @@ final class WireframeWalker {
 
   private func describe(_ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?) -> [String: Any]? {
     let name = NSStringFromClass(type(of: view))
-    let (bg, radius) = background(view)
-    let borderWidth = border(view)?.width ?? 0
+    let layers = drawingLayers(view)
+    let (bg, radius) = background(view, layers: layers)
+    // Found once per view: reading a border image draws it into a buffer.
+    let drawnBorder = border(view, layers: layers)
+    let borderWidth = drawnBorder?.width ?? 0
 
     if let field = view as? UITextField {
       var n = box(view, kind: "in", rect: rect, visible: visible, alpha: alpha)
-      style(&n, bg: bg, radius: radius, view: view)
+      style(&n, bg: bg, radius: radius, border: drawnBorder)
       n["tx"] = field.text ?? ""
       if let placeholder = field.placeholder, !placeholder.isEmpty { n["ph"] = placeholder }
       textStyle(&n, color: field.textColor, font: field.font, alignment: field.textAlignment)
@@ -144,7 +246,7 @@ final class WireframeWalker {
     }
     if let textView = view as? UITextView {
       var n = box(view, kind: textView.isEditable ? "in" : "t", rect: rect, visible: visible, alpha: alpha)
-      style(&n, bg: bg, radius: radius, view: view)
+      style(&n, bg: bg, radius: radius, border: drawnBorder)
       n["tx"] = textView.text ?? ""
       textStyle(&n, color: textView.textColor, font: textView.font, alignment: textView.textAlignment)
       if textView.isSecureTextEntry { n["sen"] = true }
@@ -165,7 +267,7 @@ final class WireframeWalker {
       }
       if text.isEmpty && bg == nil { return nil }
       var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
-      style(&n, bg: bg, radius: radius, view: view)
+      style(&n, bg: bg, radius: radius, border: drawnBorder)
       if !text.isEmpty {
         n["tx"] = text
         textStyle(&n, color: label.textColor, font: label.font, alignment: label.textAlignment)
@@ -174,7 +276,9 @@ final class WireframeWalker {
       return n
     }
     if name.contains("Paragraph") {
-      return paragraph(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, bg: bg, radius: radius)
+      return paragraph(
+        view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, bg: bg, radius: radius, border: drawnBorder
+      )
     }
     if isVector(view) {
       return picture(view, rect: rect, visible: visible, alpha: alpha, privacy: privacy, content: nil)
@@ -189,7 +293,7 @@ final class WireframeWalker {
     }
     if bg != nil || borderWidth > 0 {
       var n = box(view, kind: "s", rect: rect, visible: visible, alpha: alpha)
-      style(&n, bg: bg, radius: radius, view: view)
+      style(&n, bg: bg, radius: radius, border: drawnBorder)
       return n
     }
     return nil
@@ -197,7 +301,8 @@ final class WireframeWalker {
 
   /// Text drawn by React Native's paragraph view, from its attributed string.
   private func paragraph(
-    _ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?, bg: UIColor?, radius: CGFloat
+    _ view: UIView, rect: CGRect, visible: CGRect, alpha: CGFloat, privacy: String?, bg: UIColor?, radius: CGFloat,
+    border drawnBorder: (width: CGFloat, color: UIColor?)?
   ) -> [String: Any]? {
     let selector = NSSelectorFromString("attributedText")
     var attributed: NSAttributedString?
@@ -211,7 +316,7 @@ final class WireframeWalker {
     }
     if text.isEmpty && bg == nil { return nil }
     var n = box(view, kind: text.isEmpty ? "s" : "t", rect: rect, visible: visible, alpha: alpha)
-    style(&n, bg: bg, radius: radius, view: view)
+    style(&n, bg: bg, radius: radius, border: drawnBorder)
     if let attributed = attributed, attributed.length > 0 {
       n["tx"] = text
       let attrs = attributed.attributes(at: 0, effectiveRange: nil)
@@ -225,7 +330,7 @@ final class WireframeWalker {
       if let kern = attrs[.kern] as? NSNumber, kern.doubleValue != 0 {
         n["ls"] = round(kern.doubleValue)
       }
-      if let laid = deviceLines(attributed, size: view.bounds.size) {
+      if let laid = cachedDeviceLines(view, attributed, size: view.bounds.size) {
         n["tx"] = laid.lines
         n["ln"] = true
         n["lh"] = round(Double(laid.lineHeight))
@@ -233,6 +338,20 @@ final class WireframeWalker {
       if let privacy = privacy { n["pv"] = privacy }
     }
     return n
+  }
+
+  /// deviceLines, laid out again only when the text or the size changed.
+  private func cachedDeviceLines(
+    _ view: UIView, _ attributed: NSAttributedString, size: CGSize
+  ) -> (lines: String, lineHeight: CGFloat)? {
+    if let cached = Self.lines.object(forKey: view), cached.size == size,
+       cached.text === attributed || cached.text.isEqual(to: attributed) {
+      return cached.result
+    }
+    let result = deviceLines(attributed, size: size)
+    let copy = (attributed.copy() as? NSAttributedString) ?? attributed
+    Self.lines.setObject(Lines(text: copy, size: size, result: result), forKey: view)
+    return result
   }
 
   /// The lines of a paragraph as the device breaks them. The replay draws
@@ -303,35 +422,53 @@ final class WireframeWalker {
     if size.width > Self.pictureMaxPoints || size.height > Self.pictureMaxPoints { return n }
     let key = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))|\(content ?? "")"
     let now = CACurrentMediaTime()
-    if let cached = Self.pictures.object(forKey: view), cached.key == key,
-       content != nil || now - cached.at < Self.pictureRefresh {
-      n["img"] = cached.data
+    // While a new picture is encoded, the node keeps the last one.
+    let cached = Self.pictures.object(forKey: view)
+    if let cached = cached { n["img"] = cached.data }
+    if let cached = cached, cached.key == key, content != nil || now - cached.at < Self.pictureRefresh {
       return n
     }
+    if Self.encoding.contains(view) { return n }
     let format = UIGraphicsImageRendererFormat()
     format.scale = min(view.window?.screen.scale ?? 2, Self.pictureMaxScale)
     format.opaque = false
     let image = UIGraphicsImageRenderer(size: size, format: format).image { context in
       view.layer.render(in: context.cgContext)
     }
-    guard let png = image.pngData() else { return n }
-    let data = "data:image/png;base64," + png.base64EncodedString()
-    Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
-    n["img"] = data
+    let pixels = size.width * size.height * format.scale * format.scale
+    if pixels <= Self.pictureSyncPixels {
+      guard let png = image.pngData() else { return n }
+      let data = "data:image/png;base64," + png.base64EncodedString()
+      Self.pictures.setObject(Picture(key: key, data: data, at: now), forKey: view)
+      n["img"] = data
+      return n
+    }
+    // The next walk sends it: iOS walks on each capture.
+    Self.encoding.add(view)
+    Self.encodeQueue.async { [weak view] in
+      let data = image.pngData().map { "data:image/png;base64," + $0.base64EncodedString() }
+      DispatchQueue.main.async {
+        guard let view = view else { return }
+        Self.encoding.remove(view)
+        if let data = data {
+          Self.pictures.setObject(Picture(key: key, data: data, at: CACurrentMediaTime()), forKey: view)
+        }
+      }
+    }
     return n
   }
 
   /// Background color and corner radius. Newer React Native versions draw
   /// the background in a sublayer, so that layer is checked too.
-  private func background(_ view: UIView) -> (UIColor?, CGFloat) {
-    let radius = cornerRadius(view)
+  private func background(_ view: UIView, layers: [CALayer]) -> (UIColor?, CGFloat) {
+    let radius = cornerRadius(view, layers: layers)
     if let color = view.backgroundColor, color.cgColor.alpha > 0.01 {
       return (color, radius)
     }
     if let cg = view.layer.backgroundColor, cg.alpha > 0.01 {
       return (UIColor(cgColor: cg), radius)
     }
-    for layer in drawingLayers(view) {
+    for layer in layers {
       if let cg = layer.backgroundColor, cg.alpha > 0.01 {
         return (UIColor(cgColor: cg), radius)
       }
@@ -354,9 +491,9 @@ final class WireframeWalker {
   /// The corner radius. When React Native draws the border in a layer of
   /// its own, the view's radius is 0, and the radius is on that layer and
   /// on the background layer.
-  private func cornerRadius(_ view: UIView) -> CGFloat {
+  private func cornerRadius(_ view: UIView, layers: [CALayer]) -> CGFloat {
     if view.layer.cornerRadius > 0 { return view.layer.cornerRadius }
-    return drawingLayers(view).map(\.cornerRadius).max() ?? 0
+    return layers.map(\.cornerRadius).max() ?? 0
   }
 
   /// The border's width and color: the view's own, or the one React
@@ -364,13 +501,22 @@ final class WireframeWalker {
   /// border of a small box, stretched to the view, so the width is the run
   /// of drawn pixels from the left edge of its middle row, and the color
   /// is the first of them.
-  private func border(_ view: UIView) -> (width: CGFloat, color: UIColor?)? {
+  private func border(_ view: UIView, layers: [CALayer]) -> (width: CGFloat, color: UIColor?)? {
     if view.layer.borderWidth > 0 {
       return (view.layer.borderWidth, view.layer.borderColor.map { UIColor(cgColor: $0) })
     }
-    for layer in drawingLayers(view) {
+    for layer in layers {
       guard let contents = layer.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { continue }
-      if let drawn = imageBorder(contents as! CGImage, scale: layer.contentsScale) { return drawn }
+      let image = contents as! CGImage
+      let scale = layer.contentsScale
+      let drawn: (width: CGFloat, color: UIColor?)?
+      if let cached = Self.borders.object(forKey: view), cached.image === image, cached.scale == scale {
+        drawn = cached.result
+      } else {
+        drawn = imageBorder(image, scale: scale)
+        Self.borders.setObject(ImageBorder(image: image, scale: scale, result: drawn), forKey: view)
+      }
+      if let drawn = drawn { return drawn }
     }
     return nil
   }
@@ -439,10 +585,10 @@ final class WireframeWalker {
     return n
   }
 
-  private func style(_ n: inout [String: Any], bg: UIColor?, radius: CGFloat, view: UIView) {
+  private func style(_ n: inout [String: Any], bg: UIColor?, radius: CGFloat, border: (width: CGFloat, color: UIColor?)?) {
     if let bg = bg { n["bg"] = css(bg) }
     if radius > 0 { n["r"] = round(Double(radius)) }
-    if let drawn = border(view), drawn.width > 0 {
+    if let drawn = border, drawn.width > 0 {
       n["bw"] = round(Double(drawn.width))
       if let color = drawn.color { n["bc"] = css(color) }
     }
