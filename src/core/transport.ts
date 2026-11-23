@@ -298,6 +298,8 @@ export function flush() {
   if (sections.length === 0) return;
   const body = buildEnvelope(sections);
   const carriesReplay = sections.some((s) => s.type === REPLAY_BATCH_KEY);
+  // sendBody puts the body in flight (or in the retry queue) before it
+  // waits for the answer.
   void sendBody({
     id: uuid(),
     createdAt: Date.now(),
@@ -307,6 +309,11 @@ export function flush() {
     carriesReplay,
     notBefore: 0,
   });
+  // The outbox holds the items of this body as queued items. If the app
+  // ends before the outbox is written again, the next start sends them in
+  // a body with a new id, which the collector cannot tell from a new
+  // body. Written now, the outbox holds them in this body, with its id.
+  if (outboxHasHeld) persistOutbox();
 }
 
 /**

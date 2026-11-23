@@ -382,6 +382,32 @@ describe('transport', () => {
     expect(delivered()).toBe(1);
   });
 
+  // The collector drops a body whose batch id it already has. Queued items
+  // on disk (a crash read at start) must be sent again in the same body,
+  // with the same id, or the collector stores them twice.
+  it('sends queued items from the outbox again with the same batch id', async () => {
+    const ids: string[] = [];
+    setPoster((url, headers, body) => {
+      if (JSON.stringify(decode(body)).includes('"n":1')) ids.push(headers[BATCH_ID_HEADER]);
+      // The process ends before the answer comes.
+      return new Promise<PostResult>(() => {});
+    });
+    enqueue('events', { n: 1 });
+    restoreOutbox();
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    restart();
+    setPoster((url, headers, body) => {
+      if (JSON.stringify(decode(body)).includes('"n":1')) ids.push(headers[BATCH_ID_HEADER]);
+      return collectorPoster(url, headers, body);
+    });
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toBe(ids[0]);
+    expect(storage.get('outbox')).toBeNull();
+  });
+
   it('keeps queued items on disk when another body is answered after a fatal error', async () => {
     const answer = slowPoster();
     enqueue('events', { other: true });

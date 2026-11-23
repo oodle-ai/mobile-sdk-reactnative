@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // Local stand-in for the Oodle RUM collector. It accepts the SDK's
-// uploads on /v1/rum/ingest, checks the envelope, and writes:
+// uploads on /v1/rum/ingest, checks the envelope, stores a body with the
+// same X-Oodle-Batch-Id only once, and writes:
 //   <out>/events.ndjson               one event per line
 //   <out>/replay/<session>/seg-NNNNNN one replay segment per file (rrweb events)
 //   <out>/datadog.ndjson              one Datadog RUM upload per line, tagged with
@@ -48,6 +49,8 @@ function parseEnvelope(text) {
 }
 
 let scenario = { name: 'none', order: 'oodle-first', offline: false };
+/** The X-Oodle-Batch-Id of each body stored. */
+const seenBatches = new Set();
 const datadogFile = path.join(out, 'datadog.ndjson');
 
 function readBody(req) {
@@ -95,6 +98,17 @@ async function handleIngest(req, res) {
   }
   const body = decompress(raw, req.headers['content-encoding']);
   const { header, sections } = parseEnvelope(body.toString('utf8'));
+  // The SDK sends a body again when it lost the answer (the app was
+  // suspended or ended while it waited), with the same batch id. The
+  // collector must store such a body once. A second copy is answered,
+  // and not stored.
+  const batchId = req.headers['x-oodle-batch-id'];
+  if (batchId && seenBatches.has(batchId)) {
+    console.log(`${new Date().toISOString()} sdk=${header.sdk_version} batch ${batchId.slice(0, 8)} again, not stored`);
+    res.writeHead(202).end();
+    return;
+  }
+  if (batchId) seenBatches.add(batchId);
   const summary = [];
   for (const s of sections) {
     if (s.type === 'events') {
@@ -114,7 +128,7 @@ async function handleIngest(req, res) {
       summary.push(`${s.type} x${s.items.length}`);
     }
   }
-  console.log(`${new Date().toISOString()} sdk=${header.sdk_version} ${summary.join('; ')}`);
+  console.log(`${new Date().toISOString()} sdk=${header.sdk_version} batch ${String(batchId ?? '-').slice(0, 8)} ${summary.join('; ')}`);
   res.writeHead(202).end();
 }
 
