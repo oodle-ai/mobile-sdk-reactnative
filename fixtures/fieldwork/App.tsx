@@ -8,7 +8,8 @@ import { Home } from './src/screens/Home';
 import { More } from './src/screens/More';
 import { Orders } from './src/screens/Orders';
 import { fetchScenario, NO_SCENARIO, runScenario, type Scenario } from './src/scenario';
-import { setReferenceFirst, telemetry } from './src/telemetry';
+import { type TelemetryProvider as Provider } from './src/config';
+import { currentProvider, setReferenceFirst, setProvider, telemetry } from './src/telemetry';
 import { TelemetryProvider } from './src/telemetry/provider';
 
 const TABS: Tab[] = ['Home', 'Orders', 'Comms', 'More'];
@@ -20,15 +21,20 @@ export default function App() {
   const [ready, setReady] = useState(false);
   const [status, setStatus] = useState('Starting');
   const [scenario, setScenario] = useState<Scenario>(NO_SCENARIO);
+  // Not known until the scenario is read: it can choose the SDKs.
+  const [provider, setProviderState] = useState<Provider | undefined>(undefined);
 
   useEffect(() => {
-    // CI scenarios (scripts/ci/scenarios.sh) choose the start order of
-    // the SDKs, so the scenario is read before the SDKs start.
+    // CI scenarios (scripts/ci/scenarios.sh, scripts/compare/) choose the
+    // SDKs, their start order and replay, so the scenario is read before
+    // the SDKs start.
     fetchScenario()
       .then((s) => {
         setScenario(s);
         setReferenceFirst(s.order === 'reference-first');
-        return telemetry.initialize(true);
+        if (s.provider) setProvider(s.provider);
+        setProviderState(currentProvider());
+        return telemetry.initialize(true, s.replay);
       })
       .then(async (s) => {
         setStatus(s);
@@ -46,12 +52,12 @@ export default function App() {
   // the events its checks look for.
   useEffect(() => {
     if (!ready) return undefined;
-    if (scenario.name !== 'none') return runScenario(scenario);
+    if (scenario.name !== 'none') return runScenario(scenario, setTab);
     return autopilot ? runAutopilot(setTab) : undefined;
   }, [ready, scenario]);
 
   return (
-    <TelemetryProvider>
+    <TelemetryProvider provider={provider ?? 'none'}>
       <SafeAreaView style={styles.root}>
         <StatusBar barStyle="dark-content" />
         <Text style={styles.status} accessibilityLabel="Telemetry status">

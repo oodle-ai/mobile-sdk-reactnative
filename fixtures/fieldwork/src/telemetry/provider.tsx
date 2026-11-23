@@ -1,8 +1,9 @@
 import { OodleProvider } from '@oodle-ai/mobile-sdk-reactnative';
 import React, { type ReactNode } from 'react';
-import { telemetryProvider } from '../config';
+import type { TelemetryProvider as Provider } from '../config';
 
-// Oodle records taps from a root touch observer.
-export function TelemetryProvider({ children }: { children: ReactNode }) {
-  return telemetryProvider === 'reference' ? <>{children}</> : <OodleProvider>{children}</OodleProvider>;
+// Oodle records taps from a root touch observer. It is there only when
+// the Oodle SDK starts, so a launch without Oodle has none of its cost.
+export function TelemetryProvider({ provider, children }: { provider: Provider; children: ReactNode }) {
+  return provider === 'oodle' || provider === 'both' ? <OodleProvider>{children}</OodleProvider> : <>{children}</>;
 }
