@@ -122,3 +122,58 @@ describe('helpers', () => {
     expect(collectText(root).length).toBeLessThanOrEqual(100);
   });
 });
+
+describe('resolveTapTarget privacy', () => {
+  function rowIn(wrapperId: string | null, rowProps: Record<string, unknown> = { onPress: noop }) {
+    const textLeaf: FiberLike = { tag: 6, memoizedProps: 'John Smith, balance $4,210' };
+    const nodes = chain(
+      { type: 'RCTView', memoizedProps: wrapperId ? { nativeID: wrapperId } : {} },
+      { type: function Screen() {}, memoizedProps: {} },
+      ...pressable(rowProps),
+      { type: 'RCTView', memoizedProps: {} },
+      { type: 'RCTText', memoizedProps: {} },
+      textLeaf,
+    );
+    return nodes[nodes.length - 2];
+  }
+
+  it('sends no text from a tap inside a hidden or masked OodlePrivacy view', () => {
+    for (const level of ['hidden', 'mask']) {
+      const t = resolveTapTarget(rowIn(`oodle-privacy-${level}`), opts)!;
+      expect(t.name).toBe('Pressable');
+      expect(t.label).toBe('');
+      expect(t.private).toBe(true);
+    }
+  });
+
+  it('sends no accessibility label inside a masked view', () => {
+    const t = resolveTapTarget(
+      rowIn('oodle-privacy-mask', { onPress: noop, accessibilityLabel: 'Pay John Smith' }),
+      opts,
+    )!;
+    expect(t.label).toBe('');
+  });
+
+  it('keeps the action name attribute inside a masked view', () => {
+    const t = resolveTapTarget(
+      rowIn('oodle-privacy-hidden', { onPress: noop, 'oodle-action-name': 'Open account' }),
+      opts,
+    )!;
+    expect(t.name).toBe('Open account');
+    expect(t.private).toBe(true);
+  });
+
+  it('masks the label under mask-all, except inside an allow view', () => {
+    const masked = resolveTapTarget(rowIn(null), { ...opts, maskText: true })!;
+    expect(masked.label).toBe('');
+    expect(masked.private).toBe(false);
+    const allowed = resolveTapTarget(rowIn('oodle-privacy-allow'), { ...opts, maskText: true })!;
+    expect(allowed.label).toBe('John Smith, balance $4,210');
+  });
+
+  it('uses the text of the button when nothing masks it', () => {
+    const t = resolveTapTarget(rowIn(null), opts)!;
+    expect(t.label).toBe('John Smith, balance $4,210');
+    expect(t.private).toBe(false);
+  });
+});

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveConfig, setConfig } from '../src/core/config';
 import { resetNativeCache, storage } from '../src/core/native';
+import { saveLastContext } from '../src/core/context';
 import {
   getSession,
   isSessionExpired,
@@ -43,6 +44,12 @@ describe('sessions', () => {
     expect(s.previousId).toBe('last-run');
     expect(renewed).toEqual(['last-run']);
     expect(isSessionExpired()).toBe(false);
+  });
+
+  it('starts no session when the context is saved on a first launch', () => {
+    saveLastContext();
+    expect(peekSession()).toBeNull();
+    expect(storage.getJSON<{ session_id: string }>('last_context', { session_id: 'x' }).session_id).toBe('');
   });
 
   it('starts a session on a first launch, and keeps it while the app is used', () => {

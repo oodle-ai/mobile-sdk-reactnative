@@ -70,7 +70,14 @@ object CrashReporter {
     json.put("message", error.message ?: root.message ?: error.javaClass.simpleName)
     json.put("stack", "Thread: ${thread.name}\n$stack")
     json.put("source", "android")
-    File(dir, CRASH_FILE).writeText(json.toString(), Charsets.UTF_8)
+    // A file cut short by the end of the process cannot be read, and
+    // consume() deletes it: the crash is lost. The rename is atomic.
+    val tmp = File(dir, "$CRASH_FILE.tmp")
+    tmp.writeText(json.toString(), Charsets.UTF_8)
+    if (!tmp.renameTo(File(dir, CRASH_FILE))) {
+      File(dir, CRASH_FILE).writeText(json.toString(), Charsets.UTF_8)
+      tmp.delete()
+    }
   }
 
   /**

@@ -57,6 +57,12 @@ keeps these rules (`src/core/transport.ts`):
   (`holdSends`): the crash is on disk, and a send just before the process
   ends would be sent again by the next start.
 - A crash (`error_is_crash: 1`) is never rate limited.
+- The retry queue is oldest first. While a body waits (a backoff after a
+  failure), a new body waits behind it: sent at once, it fails too while
+  offline, and replay segments must arrive in order. At the size limits
+  the oldest bodies are dropped.
+- When consent is withdrawn (`clearAll`), the answer to a body in flight
+  is ignored, so a failed body does not go back in the queue.
 - The outbox of the last run is read after the first frame
   (`deferRestoreOutbox`). A write before that reads it first, so the file
   is never replaced unread. A crash queued at start is written at once.
@@ -94,6 +100,9 @@ applied in TypeScript, from the native privacy flags (`pv`, `sen`).
 compares the result with a fresh full snapshot; keep it passing when the
 diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 
+- Tap actions follow the replay privacy rules (`privacyLevelOf` in
+  `src/events/tap-target.ts`): under `hidden`, `mask` or `mask-all`, a tap
+  has no text label and, in a private area, no position.
 - rrweb builds an added node without its `childNodes`: a mutation adds
   each child (text, picture) on its own.
 - The picture of a drawing is a child element, so a move does not send it

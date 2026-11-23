@@ -31,4 +31,13 @@ if ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q OodleExample; then
   echo "The app left a crash report."
   exit 1
 fi
+# On a CI simulator the batch sent on the way to the background arrives
+# up to about 30 s after the app leaves the screen (the upload window of
+# the SDK). The fixed sleep above lost that race in about half the runs,
+# so wait for the background event, up to 60 s more.
+for _ in $(seq 1 60); do
+  grep -q '"ios_app_state":"background"' "$OUT/events.ndjson" 2>/dev/null && break
+  sleep 1
+done
+echo "$(date -u +%T) check"
 node "$(dirname "$0")/check-collector.mjs" --out "$OUT" --platform ios

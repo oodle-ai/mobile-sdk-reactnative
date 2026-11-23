@@ -104,7 +104,7 @@ OodleSessionReplay.start() / .stop() / .isRecording()
 | `trackResources` | `true` | XHR and fetch, including the native fetch of Expo SDK 52 and later |
 | `trackErrors` | `true` | Global JS errors and unhandled promise rejections |
 | `trackConsole` | `true` | `console.error` and `console.warn` |
-| `allowedTracingUrls` | `[]` | Hosts, URL prefixes, RegExps or functions; `{ match, propagators }` picks `tracecontext`, `b3`, `b3multi`, `datadog` |
+| `allowedTracingUrls` | `[]` | Hosts, URL prefixes, RegExps or functions; `{ match, propagators }` picks `tracecontext`, `b3`, `b3multi`, `datadog`. A URL prefix matches where a host or path part ends: `https://api.example.com` does not match `https://api.example.com.evil.net` |
 | `traceSampleRate` | `100` | Percentage of traced requests marked as sampled |
 | `nativeCrashReporting` | `true` | JVM exceptions (Android), NSExceptions and fatal signals (iOS) |
 | `trackAnrs` / `anrThresholdMs` | `true` / 5000 Android, 2000 iOS | Main thread watchdog |
@@ -157,6 +157,12 @@ it. The Oodle replay player plays them as it plays browser sessions.
 - `<OodlePrivacy level="hidden" | "mask" | "allow">` sets the privacy of
   one subtree.
 - `touchPrivacy: 'hide'` leaves touches out.
+- Tap actions follow the same rules. A tap inside a `hidden` or `mask`
+  subtree, or anywhere under `'mask-all'` (except in an `allow` subtree),
+  is named only by its `oodle-action-name` prop, or else by its component
+  (`Pressable`): no text or accessibility label of the button is sent.
+  The tap position is not sent there, nor anywhere with
+  `touchPrivacy: 'hide'`.
 
 ## How it works
 

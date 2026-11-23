@@ -72,6 +72,17 @@ describe('tracing URL matchers', () => {
       throw new Error('x');
     })('http://h')).toBe(false);
   });
+  it('matches a URL prefix only where a host or path part ends', () => {
+    const t = toUrlTest('https://api.example.com');
+    expect(t('https://api.example.com')).toBe(true);
+    expect(t('https://api.example.com/v1')).toBe(true);
+    expect(t('https://api.example.com?x=1')).toBe(true);
+    expect(t('https://api.example.com:8443/v1')).toBe(true);
+    expect(t('https://api.example.com.evil.net/v1')).toBe(false);
+    expect(t('https://api.example.company/v1')).toBe(false);
+    expect(toUrlTest('https://api.example.com/v1')('https://api.example.com/v12')).toBe(false);
+    expect(toUrlTest('https://api.example.com/v1/')('https://api.example.com/v1/x')).toBe(true);
+  });
   it('parses hosts', () => {
     expect(urlHost('http://user@Host.Example:80/p?q')).toBe('host.example');
     expect(urlHost('http://[::1]:80/')).toBe('[::1]');

@@ -60,12 +60,28 @@ export function canRecord(): boolean {
   return getConfig() !== null && getConsent() !== 'not-granted';
 }
 
-function markSessionStart(event: EventData) {
-  if (typeof event.session_id === 'string' && claimSessionStart(event.session_id)) {
-    event.session_is_new = 1;
-    const previous = peekSession()?.previousId;
-    if (previous) event.session_previous_id = previous;
-  }
+/** The fields that mark the first event of a session, or null when this is not it. */
+function sessionStartFields(event: EventData): EventData | null {
+  const s = peekSession();
+  if (!s || s.started || typeof event.session_id !== 'string' || event.session_id !== s.id) return null;
+  const fields: EventData = { session_is_new: 1 };
+  if (s.previousId) fields.session_previous_id = s.previousId;
+  return fields;
+}
+
+/**
+ * Runs beforeSend, and marks the event as the first of its session. The
+ * start is claimed only when beforeSend keeps the event: claimed for an
+ * event the app drops, the flag was never sent and the session was not
+ * counted.
+ */
+function finishEvent(built: EventData): EventData | null {
+  const start = sessionStartFields(built);
+  if (start) Object.assign(built, start);
+  const event = applyBeforeSend(built);
+  if (!event) return null;
+  if (start && claimSessionStart(String(built.session_id))) Object.assign(event, start);
+  return event;
 }
 
 /** Builds an event on the current context and queues it. */
@@ -87,8 +103,7 @@ export function emit(data: EventData, activity = true) {
   incrementSessionCount(type);
   viewCounter?.(data);
   const built: EventData = { log_record_uid: uuid(), ...baseContext(activity), ...data };
-  markSessionStart(built);
-  const event = applyBeforeSend(built);
+  const event = finishEvent(built);
   if (event) enqueue(EVENTS_BATCH_KEY, event);
 }
 
@@ -109,8 +124,7 @@ export function emitViewUpdate(data: EventData) {
   if (data.view_update_seq === 1) incrementSessionCount('view');
   const built: EventData = { log_record_uid: uuid(), ...baseContext(false), ...data };
   if (data.view_update_seq === 1) built.view_is_new = 1;
-  markSessionStart(built);
-  const event = applyBeforeSend(built);
+  const event = finishEvent(built);
   if (!event) return;
   upsert(EVENTS_BATCH_KEY, `view:${String(data.view_id)}`, event, (prev, next) => {
     const merged = { ...next };

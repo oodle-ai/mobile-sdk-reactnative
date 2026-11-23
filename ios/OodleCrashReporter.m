@@ -22,6 +22,8 @@ static const int kSignalCount = sizeof(kSignals) / sizeof(kSignals[0]);
 static char gSignalPath[1024];
 static struct sigaction gPrevious[NSIG];
 static volatile sig_atomic_t gHandled = 0;
+/// Set when a signal was passed to the handler installed before ours.
+static volatile sig_atomic_t gChained[NSIG];
 static NSUncaughtExceptionHandler *gPreviousExceptionHandler = NULL;
 static NSString *gDirectory = nil;
 static BOOL gInstalled = NO;
@@ -74,18 +76,30 @@ static void OodleSignalHandler(int sig, siginfo_t *info, void *context)
       close(fd);
     }
   }
-  // Hand the signal to whoever had it before, then let it end the process.
+  // Hand the signal to whoever had it before (Datadog's reporter), then
+  // let it end the process. A handler that returns can have dealt with
+  // the signal, so this handler returns too. If the same signal comes
+  // again, the previous handler did not end the process: a fault runs
+  // its instruction again after a return, and without the default action
+  // the app would loop here instead of ending.
   struct sigaction *previous = &gPrevious[sig];
-  if (previous->sa_flags & SA_SIGINFO) {
-    if (previous->sa_sigaction) {
-      previous->sa_sigaction(sig, info, context);
+  if (!gChained[sig]) {
+    gChained[sig] = 1;
+    if (previous->sa_flags & SA_SIGINFO) {
+      if (previous->sa_sigaction) {
+        previous->sa_sigaction(sig, info, context);
+        return;
+      }
+    } else if (previous->sa_handler != SIG_DFL && previous->sa_handler != SIG_IGN) {
+      previous->sa_handler(sig);
       return;
     }
-  } else if (previous->sa_handler != SIG_DFL && previous->sa_handler != SIG_IGN) {
-    previous->sa_handler(sig);
-    return;
   }
-  sigaction(sig, previous, NULL);
+  struct sigaction dfl;
+  memset(&dfl, 0, sizeof(dfl));
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  sigaction(sig, &dfl, NULL);
   raise(sig);
 }
 
