@@ -13,7 +13,11 @@ DEVICE=$(xcrun simctl list devices available -j |
   python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for r in d.values() for x in r if x['name'].startswith('iPhone')))")
 xcrun simctl boot "$DEVICE"
 xcrun simctl bootstatus "$DEVICE" -b
+# The install took from 1 to 7 minutes in CI. The times show which
+# step takes long.
+echo "$(date -u +%T) install"
 xcrun simctl install "$DEVICE" "$APP"
+echo "$(date -u +%T) launch"
 xcrun simctl launch "$DEVICE" "$BUNDLE"
 sleep 30
 # Another app in front sends the fixture to the background.
