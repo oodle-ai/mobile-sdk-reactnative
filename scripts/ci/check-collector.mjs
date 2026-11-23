@@ -45,7 +45,8 @@ check(views.some((v) => v.memory_max_bytes > 0), 'native memory vitals on a view
 // Other event types from the autopilot.
 const resource = of('resource').find((r) => String(r.url_full).includes('/api/orders'));
 check(Boolean(resource), 'resource for /api/orders');
-check(resource && !String(resource.url_full).includes('?'), 'resource URL has no query string');
+// url_full is the URL as the app requested it (screens/Orders.tsx), with its query string.
+check(String(resource?.url_full).endsWith('/orders?driver=driver-ava'), 'resource URL keeps its query string');
 check(resource?.http_request_method === 'GET', 'resource has http_request_method');
 check(typeof resource?.http_response_status_code === 'number', 'resource has http_response_status_code');
 check(Boolean(resource?.trace_id), 'resource to an allowed host has a trace id');
