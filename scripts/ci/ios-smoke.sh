@@ -34,6 +34,11 @@ if ! xcrun simctl spawn "$DEVICE" launchctl list | grep -q "$BUNDLE"; then
   echo "The app process is gone."
   exit 1
 fi
+# Simulator apps are processes of the host. A sample of the app in the
+# background shows what its threads wait on, for a run where the
+# background events do not arrive.
+PID=$(xcrun simctl spawn "$DEVICE" launchctl list | awk -v b="$BUNDLE" 'index($3, b) && $1 != "-" { print $1 }' | head -1)
+if [ -n "$PID" ]; then sample "$PID" 3 -file "$OUT/background-sample.txt" > /dev/null 2>&1 || true; fi
 if ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q OodleExample; then
   echo "The app left a crash report."
   exit 1
