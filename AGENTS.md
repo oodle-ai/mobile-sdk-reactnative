@@ -57,6 +57,10 @@ keeps these rules (`src/core/transport.ts`):
   (`holdSends`): the crash is on disk, and a send just before the process
   ends would be sent again by the next start.
 - A crash (`error_is_crash: 1`) is never rate limited.
+- On the way to the background the outbox is written synchronously, as
+  on a fatal error. A backgrounded app can get so little CPU that a write
+  on a native background queue does not run before iOS ends it (seen on
+  the CI runners); the events sent on the way out were then lost.
 - The retry queue is oldest first. While a body waits (a backoff after a
   failure), a new body waits behind it: sent at once, it fails too while
   offline, and replay segments must arrive in order. At the size limits

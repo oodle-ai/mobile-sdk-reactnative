@@ -592,6 +592,28 @@ describe('OodleRum end to end', () => {
     expect(closed.at(-1)).toMatchObject({ session_id: before, view_is_active: 0 });
   });
 
+  it('writes the outbox at once when the app goes to the background', async () => {
+    sdk.OodleRum.startView('bg-write-key', 'BgWrite');
+    await settle();
+    // The collector does not answer before the app is ended.
+    const held: Array<() => void> = [];
+    transport.setPoster(
+      () => new Promise((resolve) => held.push(() => resolve({ status: 202, rateLimits: null }))),
+    );
+    fakeNative.storageSetAsync.mockClear();
+    store.delete('outbox');
+    rnStub.emitAppState('background');
+    // No await: the outbox is on disk before any queued work runs.
+    const box = JSON.parse(store.get('outbox') ?? '{"retry":[]}');
+    const bodies = (box.retry as Array<{ body: string }>).map((r) => r.body).join('\n');
+    expect(bodies).toContain('"ios_app_state":"background"'.replace('ios', rnStub.Platform.OS));
+    expect(fakeNative.storageSetAsync).not.toHaveBeenCalledWith('outbox', expect.anything());
+    for (const answer of held) answer();
+    transport.setPoster(collectorPoster);
+    rnStub.emitAppState('active');
+    await settle();
+  });
+
   it('writes the outbox on a background thread', async () => {
     fakeNative.storageSetAsync.mockClear();
     sdk.OodleRum.addAction('queued, not sent yet');

@@ -58,6 +58,10 @@
   flush sent a new request while offline. The retry queue stays oldest
   first, so replay segments arrive in the order they were recorded, and
   the oldest bodies are dropped first at the size limit.
+- The outbox is written at once when the app goes to the background, not
+  on a background queue. A backgrounded app can get too little CPU for
+  the queued write to run before the OS ends it, and the events sent on
+  the way out were lost.
 - The outbox write escapes each body once, not on every write. Offline
   with replay on, this cost the JS thread most.
 - A session is counted when `beforeSend` drops its first event: the next
