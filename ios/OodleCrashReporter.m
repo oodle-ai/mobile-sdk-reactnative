@@ -2,10 +2,17 @@
 
 #import <execinfo.h>
 #import <fcntl.h>
+#import <mach/mach.h>
+#import <pthread.h>
 #import <signal.h>
+#import <stdlib.h>
 #import <string.h>
+#import <sys/ucontext.h>
 #import <time.h>
 #import <unistd.h>
+#if __has_feature(ptrauth_calls)
+#import <ptrauth.h>
+#endif
 
 static NSString *const kExceptionFile = @"crash-exception.json";
 static NSString *const kSignalFile = @"crash-signal.txt";
@@ -22,6 +29,8 @@ static const int kSignalCount = sizeof(kSignals) / sizeof(kSignals[0]);
 static char gSignalPath[1024];
 static struct sigaction gPrevious[NSIG];
 static volatile sig_atomic_t gHandled = 0;
+/// Set when a signal was passed to the handler installed before ours.
+static volatile sig_atomic_t gChained[NSIG];
 static NSUncaughtExceptionHandler *gPreviousExceptionHandler = NULL;
 static NSString *gDirectory = nil;
 static BOOL gInstalled = NO;
@@ -52,6 +61,81 @@ static void WriteNumber(int fd, long value)
   WriteAll(fd, &buf[i]);
 }
 
+/// A stack overflow fills the stack of its thread, and a handler that runs
+/// there cannot start: the crash was lost. The handler runs on this stack
+/// instead (SA_ONSTACK). Each thread needs its own; the main thread and the
+/// thread that installs the handler get one. A thread that already has one
+/// (Datadog's KSCrash sets one) keeps it. The size leaves room for the
+/// handler of a crash reporter that runs after this one.
+static const size_t kSignalStackSize = 256 * 1024;
+
+static void InstallSignalStack(void)
+{
+  stack_t current;
+  if (sigaltstack(NULL, &current) != 0) return;
+  if (!(current.ss_flags & SS_DISABLE) && current.ss_sp != NULL) return;
+  void *memory = calloc(1, kSignalStackSize);
+  if (memory == NULL) return;
+  stack_t stack;
+  stack.ss_sp = memory;
+  stack.ss_size = kSignalStackSize;
+  stack.ss_flags = 0;
+  if (sigaltstack(&stack, NULL) != 0) free(memory);
+}
+
+static uintptr_t StripPointer(uintptr_t address)
+{
+#if __has_feature(ptrauth_calls)
+  return (uintptr_t)ptrauth_strip((void *)address, ptrauth_key_return_address);
+#else
+  return address;
+#endif
+}
+
+/// The stack of the interrupted code, from the signal context: its program
+/// counter, then the return address of each frame on the frame pointer
+/// chain. backtrace() walks from the handler instead, and on the signal
+/// stack its frames are outside the thread stack, so it found none. The
+/// walk reads only the live stack, from the interrupted stack pointer up
+/// to the top of the thread stack, with each frame above the last.
+static int StackFromContext(void *context, void **frames, int max)
+{
+  if (context == NULL || max <= 0) return 0;
+  _STRUCT_MCONTEXT *mc = ((ucontext_t *)context)->uc_mcontext;
+  if (mc == NULL) return 0;
+#if defined(__arm64__)
+  uintptr_t pc = StripPointer((uintptr_t)arm_thread_state64_get_pc(mc->__ss));
+  uintptr_t fp = (uintptr_t)arm_thread_state64_get_fp(mc->__ss);
+  uintptr_t sp = (uintptr_t)arm_thread_state64_get_sp(mc->__ss);
+  // A leaf function keeps its return address in the link register and
+  // saves no frame, so its caller is not on the frame pointer chain.
+  uintptr_t lr = StripPointer((uintptr_t)arm_thread_state64_get_lr(mc->__ss));
+#elif defined(__x86_64__)
+  uintptr_t pc = (uintptr_t)mc->__ss.__rip;
+  uintptr_t fp = (uintptr_t)mc->__ss.__rbp;
+  uintptr_t sp = (uintptr_t)mc->__ss.__rsp;
+  uintptr_t lr = 0;
+#else
+  return 0;
+#endif
+  uintptr_t top = (uintptr_t)pthread_get_stackaddr_np(pthread_self());
+  int count = 0;
+  frames[count++] = (void *)pc;
+  bool fpValid = fp >= sp && fp + 2 * sizeof(uintptr_t) <= top && (fp % sizeof(uintptr_t)) == 0;
+  uintptr_t firstReturn = fpValid ? StripPointer(((uintptr_t *)fp)[1]) : 0;
+  if (lr != 0 && lr != pc && lr != firstReturn && count < max) frames[count++] = (void *)lr;
+  while (count < max && fp >= sp && fp + 2 * sizeof(uintptr_t) <= top && (fp % sizeof(uintptr_t)) == 0) {
+    uintptr_t *record = (uintptr_t *)fp;
+    uintptr_t next = record[0];
+    uintptr_t ret = StripPointer(record[1]);
+    if (ret == 0) break;
+    frames[count++] = (void *)ret;
+    if (next <= fp) break;
+    fp = next;
+  }
+  return count;
+}
+
 static void OodleSignalHandler(int sig, siginfo_t *info, void *context)
 {
   // An uncaught NSException ends in abort(); its report is already written.
@@ -65,27 +149,43 @@ static void OodleSignalHandler(int sig, siginfo_t *info, void *context)
       WriteNumber(fd, (long)time(NULL));
       WriteAll(fd, "\n");
       void *frames[66];
-      int count = backtrace(frames, 66);
-      // The first two frames are this handler and _sigtramp, which every
-      // signal crash shares. The issue of a crash is named from its top
-      // frame, so the stack starts at the code the signal interrupted.
-      int skip = count > 2 ? 2 : 0;
+      int skip = 0;
+      int count = StackFromContext(context, frames, 64);
+      if (count <= 1) {
+        count = backtrace(frames, 66);
+        // The first two frames are this handler and _sigtramp, which every
+        // signal crash shares. The issue of a crash is named from its top
+        // frame, so the stack starts at the code the signal interrupted.
+        skip = count > 2 ? 2 : 0;
+      }
       backtrace_symbols_fd(frames + skip, count - skip, fd);
       close(fd);
     }
   }
-  // Hand the signal to whoever had it before, then let it end the process.
+  // Hand the signal to whoever had it before (Datadog's reporter), then
+  // let it end the process. A handler that returns can have dealt with
+  // the signal, so this handler returns too. If the same signal comes
+  // again, the previous handler did not end the process: a fault runs
+  // its instruction again after a return, and without the default action
+  // the app would loop here instead of ending.
   struct sigaction *previous = &gPrevious[sig];
-  if (previous->sa_flags & SA_SIGINFO) {
-    if (previous->sa_sigaction) {
-      previous->sa_sigaction(sig, info, context);
+  if (!gChained[sig]) {
+    gChained[sig] = 1;
+    if (previous->sa_flags & SA_SIGINFO) {
+      if (previous->sa_sigaction) {
+        previous->sa_sigaction(sig, info, context);
+        return;
+      }
+    } else if (previous->sa_handler != SIG_DFL && previous->sa_handler != SIG_IGN) {
+      previous->sa_handler(sig);
       return;
     }
-  } else if (previous->sa_handler != SIG_DFL && previous->sa_handler != SIG_IGN) {
-    previous->sa_handler(sig);
-    return;
   }
-  sigaction(sig, previous, NULL);
+  struct sigaction dfl;
+  memset(&dfl, 0, sizeof(dfl));
+  dfl.sa_handler = SIG_DFL;
+  sigemptyset(&dfl.sa_mask);
+  sigaction(sig, &dfl, NULL);
   raise(sig);
 }
 
@@ -155,6 +255,12 @@ static NSString *SignalName(int sig)
     sigemptyset(&action.sa_mask);
     for (int i = 0; i < kSignalCount; i++) {
       sigaction(kSignals[i], &action, &gPrevious[kSignals[i]]);
+    }
+    InstallSignalStack();
+    if (![NSThread isMainThread]) {
+      dispatch_async(dispatch_get_main_queue(), ^{
+        InstallSignalStack();
+      });
     }
     gInstalled = YES;
     return YES;

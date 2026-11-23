@@ -33,6 +33,13 @@ public final class OodleRumImpl: NSObject {
       ?? URL(fileURLWithPath: NSTemporaryDirectory())
     directory = base.appendingPathComponent("oodle-rum", isDirectory: true)
     try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    // The outbox, the session and the saved user stay on this device. A
+    // backup restored on another device would send its events again, and
+    // continue its session there.
+    var excluded = URLResourceValues()
+    excluded.isExcludedFromBackup = true
+    var backupTarget = directory
+    try? backupTarget.setResourceValues(excluded)
     super.init()
     pathMonitor.pathUpdateHandler = { [weak self] path in
       let value: String
@@ -233,7 +240,9 @@ public final class OodleRumImpl: NSObject {
     if let w = watchdog {
       w.setEnabled(true)
     } else {
-      let w = HangWatchdog(thresholdMs: thresholdMs > 0 ? thresholdMs : 2000, events: events)
+      // Int(_:) traps on Infinity and NaN.
+      let ms = thresholdMs.isFinite && thresholdMs > 0 ? min(thresholdMs, 60_000) : 2000
+      let w = HangWatchdog(thresholdMs: ms, events: events)
       w.start()
       watchdog = w
     }

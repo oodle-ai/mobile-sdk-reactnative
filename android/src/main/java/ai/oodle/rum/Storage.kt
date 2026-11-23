@@ -15,7 +15,7 @@ import java.util.concurrent.Executors
  * older background write.
  */
 class Storage(context: Context) {
-  private val dir = File(context.filesDir, DIR).apply { mkdirs() }
+  private val dir = directory(context).apply { mkdirs() }
 
   private fun file(key: String) = File(dir, key.replace(Regex("[^A-Za-z0-9_.-]"), "_"))
 
@@ -74,6 +74,22 @@ class Storage(context: Context) {
 
   companion object {
     const val DIR = "oodle-rum"
+
+    /**
+     * The SDK files (unsent events, the session, the saved user, a crash)
+     * are not in backups: a backup restored on another device would send
+     * its events again and go on with its session there. An SDK cannot
+     * change the backup rules of the app, so the files are in
+     * noBackupFilesDir, which Android never backs up.
+     */
+    fun directory(context: Context): File {
+      val app = context.applicationContext
+      // SDK 0.1.3 and earlier kept the files in filesDir. Nothing in a
+      // shipped app depends on them, and they would stay in its backups.
+      val old = File(app.filesDir, DIR)
+      if (old.exists()) old.deleteRecursively()
+      return File(app.noBackupFilesDir, DIR)
+    }
     // Shared by all instances: the crash handler and the module can hold
     // different Storage objects for the same files.
     private val LOCK = Any()

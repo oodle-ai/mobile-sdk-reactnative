@@ -157,14 +157,22 @@ const server = http.createServer((req, res) => {
   });
 });
 
+// Idle connections stay open. On the CI macOS runners, a new connection
+// from the simulator can wait a long time in the system proxy lookup
+// (SCDynamicStoreCopyProxies), and Node's default of 5 s made the app
+// open one after each quiet time. Each new connection is logged.
+server.keepAliveTimeout = 10 * 60_000;
+server.headersTimeout = server.keepAliveTimeout + 1000;
+server.on('connection', (socket) => console.log(`connection from port ${socket.remotePort}`));
 server.listen(port, host, () => console.log(`mock collector on http://${host}:${port}, writing to ${out}`));
 
 const apiPort = opt('api-port', '');
 if (apiPort) {
-  http
-    .createServer((req, res) => {
-      console.log(`api ${req.method} ${req.url} traceparent=${req.headers.traceparent ?? '-'}`);
-      res.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
-    })
-    .listen(Number(apiPort), host, () => console.log(`stand-in app API on http://${host}:${apiPort}`));
+  const api = http.createServer((req, res) => {
+    console.log(`api ${req.method} ${req.url} traceparent=${req.headers.traceparent ?? '-'}`);
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
+  });
+  api.keepAliveTimeout = server.keepAliveTimeout;
+  api.headersTimeout = server.headersTimeout;
+  api.listen(Number(apiPort), host, () => console.log(`stand-in app API on http://${host}:${apiPort}`));
 }

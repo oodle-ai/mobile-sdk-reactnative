@@ -223,7 +223,8 @@ beforeAll(async () => {
     allowedTracingUrls: [{ match: 'api.fieldwork.test', propagators: ['tracecontext', 'datadog'] }],
     // The default records a replay for only a sample of sessions. The
     // replay tests below need this session to record one.
-    sessionReplay: { sampleRate: 100 },
+    // The default is mask-all; these tests read replay text and tap labels.
+    sessionReplay: { sampleRate: 100, textAndInputPrivacy: 'mask-all-inputs' },
   });
   expect(ok).toBe(true);
 });
@@ -586,6 +587,31 @@ describe('OodleRum end to end', () => {
     expect(away.length).toBeGreaterThan(0);
     expect(away[0].view_id).not.toBe(viewBefore);
     expect(all('events').find((e) => e.session_id === after && e.session_is_new === 1)?.session_previous_id).toBe(before);
+    // The view the app left closes, in its own session.
+    const closed = events('view').filter((v) => v.view_id === viewBefore);
+    expect(closed.at(-1)).toMatchObject({ session_id: before, view_is_active: 0 });
+  });
+
+  it('writes the outbox at once when the app goes to the background', async () => {
+    sdk.OodleRum.startView('bg-write-key', 'BgWrite');
+    await settle();
+    // The collector does not answer before the app is ended.
+    const held: Array<() => void> = [];
+    transport.setPoster(
+      () => new Promise((resolve) => held.push(() => resolve({ status: 202, rateLimits: null }))),
+    );
+    fakeNative.storageSetAsync.mockClear();
+    store.delete('outbox');
+    rnStub.emitAppState('background');
+    // No await: the outbox is on disk before any queued work runs.
+    const box = JSON.parse(store.get('outbox') ?? '{"retry":[]}');
+    const bodies = (box.retry as Array<{ body: string }>).map((r) => r.body).join('\n');
+    expect(bodies).toContain('"ios_app_state":"background"'.replace('ios', rnStub.Platform.OS));
+    expect(fakeNative.storageSetAsync).not.toHaveBeenCalledWith('outbox', expect.anything());
+    for (const answer of held) answer();
+    transport.setPoster(collectorPoster);
+    rnStub.emitAppState('active');
+    await settle();
   });
 
   it('writes the outbox on a background thread', async () => {
@@ -626,6 +652,32 @@ describe('OodleRum end to end', () => {
     expect(first).toHaveLength(1);
     expect(first[0].session_previous_id).toBe(before);
     expect(events('view').some((v) => v.session_id === after && v.app_screen_name === 'Idle')).toBe(true);
+    // The view left open through the idle time closes in the old session,
+    // and its closing update does not count as activity there.
+    const closing = events('view').filter((v) => v.session_id === before && v.app_screen_name === 'Idle');
+    expect(closing).toHaveLength(1);
+    expect(closing[0].view_is_active).toBe(0);
+    expect(closing[0].session_is_new).toBeUndefined();
+  });
+
+  it('closes the view of an ended session when the next screen starts', async () => {
+    sdk.OodleRum.startView('idle-nav-key', 'IdleNav');
+    await settle();
+    const before = sdk.OodleRum.getSessionId();
+    const viewId = events('view').filter((v) => v.app_screen_name === 'IdleNav').at(-1)!.view_id;
+    for (let m = 0; m < 16; m++) await vi.advanceTimersByTimeAsync(60_000);
+    expect(sdk.OodleRum.getSessionId()).toBe('');
+    uploads.length = 0;
+    sdk.OodleRum.startView('next-key', 'Next');
+    await settle();
+    const closing = events('view').filter((v) => v.view_id === viewId);
+    expect(closing).toHaveLength(1);
+    expect(closing[0]).toMatchObject({ session_id: before, view_is_active: 0 });
+    // Its time spent runs to the end, not to the last refresh.
+    expect(closing[0].view_time_spent_ms as number).toBeGreaterThanOrEqual(16 * 60_000);
+    const after = sdk.OodleRum.getSessionId();
+    expect(after).not.toBe(before);
+    expect(events('view').find((v) => v.app_screen_name === 'Next')).toMatchObject({ session_id: after, view_is_active: 1 });
   });
 
   it('starts a new session after stopSession', async () => {

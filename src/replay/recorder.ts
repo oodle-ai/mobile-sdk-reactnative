@@ -94,6 +94,12 @@ function flushSegment(ended?: SessionData | null) {
     segmentTimer = null;
   }
   if (segment.length === 0) return;
+  if (getConsent() === 'not-granted') {
+    // Consent was withdrawn: what was recorded is dropped, not queued.
+    segment = [];
+    segmentBytes = 0;
+    return;
+  }
   const events = segment;
   const bytes = segmentBytes;
   const sessionId = segmentSessionId;
@@ -265,14 +271,21 @@ export function onReplayForeground() {
 
 // --- Touches, from OodleProvider ---
 
+/**
+ * True when x, y is over a hidden or masked view of the last capture.
+ * The position of a touch there can show what was typed (a custom PIN
+ * pad). Known only while replay records.
+ */
+export function isOverPrivateArea(x: number, y: number): boolean {
+  for (const [ax, ay, aw, ah] of hiddenAreas) {
+    if (x >= ax && x <= ax + aw && y >= ay && y <= ay + ah) return true;
+  }
+  return false;
+}
+
 function touchAllowed(x: number, y: number): boolean {
   if (!recording || getConfig()?.replay.touchPrivacy === 'hide') return false;
-  // No touch over a hidden or masked view: its position can show what
-  // was typed (a custom PIN pad).
-  for (const [ax, ay, aw, ah] of hiddenAreas) {
-    if (x >= ax && x <= ax + aw && y >= ay && y <= ay + ah) return false;
-  }
-  return true;
+  return !isOverPrivateArea(x, y);
 }
 
 function trackDrag(x: number, y: number) {

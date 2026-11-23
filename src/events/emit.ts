@@ -60,12 +60,28 @@ export function canRecord(): boolean {
   return getConfig() !== null && getConsent() !== 'not-granted';
 }
 
-function markSessionStart(event: EventData) {
-  if (typeof event.session_id === 'string' && claimSessionStart(event.session_id)) {
-    event.session_is_new = 1;
-    const previous = peekSession()?.previousId;
-    if (previous) event.session_previous_id = previous;
-  }
+/** The fields that mark the first event of a session, or null when this is not it. */
+function sessionStartFields(event: EventData): EventData | null {
+  const s = peekSession();
+  if (!s || s.started || typeof event.session_id !== 'string' || event.session_id !== s.id) return null;
+  const fields: EventData = { session_is_new: 1 };
+  if (s.previousId) fields.session_previous_id = s.previousId;
+  return fields;
+}
+
+/**
+ * Runs beforeSend, and marks the event as the first of its session. The
+ * start is claimed only when beforeSend keeps the event: claimed for an
+ * event the app drops, the flag was never sent and the session was not
+ * counted.
+ */
+function finishEvent(built: EventData): EventData | null {
+  const start = sessionStartFields(built);
+  if (start) Object.assign(built, start);
+  const event = applyBeforeSend(built);
+  if (!event) return null;
+  if (start && claimSessionStart(String(built.session_id))) Object.assign(event, start);
+  return event;
 }
 
 /** Builds an event on the current context and queues it. */
@@ -87,9 +103,15 @@ export function emit(data: EventData, activity = true) {
   incrementSessionCount(type);
   viewCounter?.(data);
   const built: EventData = { log_record_uid: uuid(), ...baseContext(activity), ...data };
-  markSessionStart(built);
-  const event = applyBeforeSend(built);
+  const event = finishEvent(built);
   if (event) enqueue(EVENTS_BATCH_KEY, event);
+}
+
+/** The session a view belongs to, and whether this update closes the view. */
+export interface ViewOwner {
+  sessionId: string;
+  sampled: boolean;
+  closing: boolean;
 }
 
 /**
@@ -97,20 +119,27 @@ export function emit(data: EventData, activity = true) {
  * per `view_id`, and count the view from its first update. Unsent
  * updates of one view collapse into the newest, which keeps the flags
  * that count the view and the session.
+ *
+ * An update goes out on the session of its view. Once that session has
+ * ended, only the closing update goes out: readers take a view's vitals
+ * from it, and without it the view stays open. It is not activity, so it
+ * does not keep the session open or start one.
  */
-export function emitViewUpdate(data: EventData) {
+export function emitViewUpdate(data: EventData, owner: ViewOwner) {
   if (!canRecord()) return;
-  // A refresh of a view the reader left open does not start a session;
-  // a new screen started one (startView) before it gets here.
-  if (isSessionExpired()) return;
-  const session = getSession(false);
-  if (!session.sampled) return;
+  if (!owner.sampled) return;
+  const live = !isSessionExpired() && peekSession()?.id === owner.sessionId;
+  if (!live && !owner.closing) return;
   if (isServerRateLimited('events')) return;
-  if (data.view_update_seq === 1) incrementSessionCount('view');
-  const built: EventData = { log_record_uid: uuid(), ...baseContext(false), ...data };
+  if (live && data.view_update_seq === 1) incrementSessionCount('view');
+  const built: EventData = {
+    log_record_uid: uuid(),
+    ...baseContext(false),
+    ...data,
+    session_id: owner.sessionId,
+  };
   if (data.view_update_seq === 1) built.view_is_new = 1;
-  markSessionStart(built);
-  const event = applyBeforeSend(built);
+  const event = finishEvent(built);
   if (!event) return;
   upsert(EVENTS_BATCH_KEY, `view:${String(data.view_id)}`, event, (prev, next) => {
     const merged = { ...next };
