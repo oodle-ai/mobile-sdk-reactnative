@@ -3,6 +3,7 @@ import { gzipSync, strToU8 } from 'fflate';
 import { Platform } from 'react-native';
 import { SDK_VERSION } from '../version';
 import { getConfig } from './config';
+import { uuid } from './ids';
 import { INTERNAL_REQUEST } from './internal';
 import { logger } from './logger';
 import { storage } from './native';
@@ -24,13 +25,27 @@ const REPLAY_MEASURE_LIMIT = 64_000;
 const MAX_HELD_ITEMS = 1000;
 const MAX_IN_FLIGHT = 4;
 const MAX_RETRY_BYTES = 10_000_000;
+/**
+ * Answers from the collector that a body can fail with (429, 5xx) before
+ * it is dropped. Failures to reach the collector at all (offline, a
+ * timeout) do not count: a phone can be offline for hours, and its data
+ * is sent when it is back. MAX_RETRY_AGE_MS and MAX_RETRY_BYTES bound those.
+ */
 const MAX_RETRY_ATTEMPTS = 8;
+/** A body that could not be sent for this long is dropped, as Datadog's SDKs do. */
+const MAX_RETRY_AGE_MS = 18 * 60 * 60 * 1000;
 const INITIAL_BACKOFF_MS = 1000;
 const MAX_BACKOFF_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** Upper bound for the outbox that survives an app restart. */
 const MAX_OUTBOX_CHARS = 4_000_000;
 const OUTBOX_KEY = 'outbox';
+/**
+ * The id of a body, the same on every send of it, so the collector can
+ * tell a body it already has: a body is sent again when its answer was
+ * lost (the app was suspended or ended while it waited).
+ */
+export const BATCH_ID_HEADER = 'X-Oodle-Batch-Id';
 const FLUSH_ORDER = [EVENTS_BATCH_KEY, REPLAY_BATCH_KEY, TELEMETRY_BATCH_KEY];
 
 interface Queue {
@@ -40,8 +55,15 @@ interface Queue {
 }
 
 interface RetryItem {
+  /** The same on every send of the body: BATCH_ID_HEADER. */
+  id: string;
+  /** When the body was built, for MAX_RETRY_AGE_MS. */
+  createdAt: number;
   body: string;
+  /** Failed answers from the collector (429, 5xx), for MAX_RETRY_ATTEMPTS. */
   attempts: number;
+  /** All failed sends, for the backoff. */
+  failures: number;
   carriesReplay: boolean;
   /** Earliest time to send again, after a failure. */
   notBefore: number;
@@ -75,6 +97,12 @@ const inFlight = new Set<RetryItem>();
 let canSend: () => boolean = () => true;
 let replayDropHandler: (() => void) | null = null;
 let authWarned = false;
+/**
+ * True from a fatal error until the app's own handler has it. The crash
+ * is already in the outbox, and a body sent now could reach the collector
+ * just before the process ends: the next start would send it again.
+ */
+let sendsHeld = false;
 const rateLimitedUntil = new Map<string, number>();
 
 function xhrPost(
@@ -265,20 +293,52 @@ export function flush() {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
-  if (!getConfig() || !canSend()) return;
+  if (!getConfig() || !canSend() || sendsHeld) return;
   const sections = takeSections();
   if (sections.length === 0) return;
   const body = buildEnvelope(sections);
   const carriesReplay = sections.some((s) => s.type === REPLAY_BATCH_KEY);
-  void sendBody({ body, attempts: 0, carriesReplay, notBefore: 0 });
+  // sendBody puts the body in flight (or in the retry queue) before it
+  // waits for the answer.
+  void sendBody({
+    id: uuid(),
+    createdAt: Date.now(),
+    body,
+    attempts: 0,
+    failures: 0,
+    carriesReplay,
+    notBefore: 0,
+  });
+  // The outbox holds the items of this body as queued items. If the app
+  // ends before the outbox is written again, the next start sends them in
+  // a body with a new id, which the collector cannot tell from a new
+  // body. Written now, the outbox holds them in this body, with its id.
+  if (outboxHasHeld) persistOutbox();
 }
 
-function headers(): Record<string, string> {
+/**
+ * Stops all sends, from a fatal error until its handoff to the app's own
+ * handler. `false` sends again, for a handler that did not end the app.
+ */
+export function holdSends(held: boolean) {
+  sendsHeld = held;
+  // Not at once: the process usually ends just after the handoff, and a
+  // send in that moment is what the hold is for.
+  if (held) return;
+  const interval = getConfig()?.flushIntervalMs ?? 5000;
+  setTimeout(() => {
+    flush();
+    drainRetries();
+  }, interval);
+}
+
+function headers(item: RetryItem): Record<string, string> {
   const c = getConfig()!;
   return {
     'X-OODLE-INSTANCE': c.instanceId,
     'X-API-KEY': c.apiKey,
     'Content-Type': 'application/json',
+    [BATCH_ID_HEADER]: item.id,
   };
 }
 
@@ -323,21 +383,24 @@ async function sendBody(item: RetryItem): Promise<void> {
   const config = getConfig();
   if (!config) return;
   if (inFlight.size >= MAX_IN_FLIGHT) {
-    addRetry(item, false);
+    addRetry(item);
     return;
   }
   inFlight.add(item);
   try {
     const { body, gzip } = compress(item.body);
-    const h = headers();
+    const h = headers(item);
     if (gzip) h['Content-Encoding'] = 'gzip';
     const sentAt = Date.now();
     const res = await poster(`${config.endpoint}${INGEST_PATH}`, h, body);
     if (res.status > 0) observeServerDate(res.date, sentAt, Date.now());
     parseRateLimits(res.rateLimits);
-    if (res.status === 429 || res.status >= 500 || res.status === 0) {
+    if (res.status === 429 || res.status >= 500) {
       inFlight.delete(item);
-      addRetry(item, true);
+      addRetry(item, 'answer');
+    } else if (res.status === 0) {
+      inFlight.delete(item);
+      addRetry(item, 'unreachable');
     } else {
       if (res.status >= 400) {
         // The request itself is wrong (bad key, bad body). Sending it
@@ -357,7 +420,7 @@ async function sendBody(item: RetryItem): Promise<void> {
   } catch {
     inFlight.delete(item);
     incrTelemetry('send_failures');
-    addRetry(item, true);
+    addRetry(item, 'unreachable');
   } finally {
     drainRetries();
   }
@@ -405,9 +468,19 @@ export function retryDelayMs(attempts: number, random: () => number = Math.rando
   return Math.round(step / 2 + random() * (step / 2));
 }
 
-function addRetry(item: RetryItem, failed: boolean) {
-  const attempts = failed ? item.attempts + 1 : item.attempts;
-  if (attempts > MAX_RETRY_ATTEMPTS) {
+function expired(item: RetryItem): boolean {
+  return Date.now() - item.createdAt > MAX_RETRY_AGE_MS;
+}
+
+/**
+ * Queues a body to send again. `failure` is why its send failed: the
+ * collector answered with an error, or could not be reached. Without
+ * one, the body waited for a free send slot.
+ */
+function addRetry(item: RetryItem, failure?: 'answer' | 'unreachable') {
+  const attempts = failure === 'answer' ? item.attempts + 1 : item.attempts;
+  const failures = failure ? item.failures + 1 : item.failures;
+  if (attempts > MAX_RETRY_ATTEMPTS || expired(item)) {
     incrTelemetry('retry_drops');
     onDropped(item.carriesReplay);
     return;
@@ -415,7 +488,8 @@ function addRetry(item: RetryItem, failed: boolean) {
   const next: RetryItem = {
     ...item,
     attempts,
-    notBefore: failed ? Date.now() + retryDelayMs(attempts) : 0,
+    failures,
+    notBefore: failure ? Date.now() + retryDelayMs(failures) : 0,
   };
   while (retryBytes + next.body.length > MAX_RETRY_BYTES && retryQueue.length > 0) {
     const old = retryQueue.shift()!;
@@ -425,7 +499,7 @@ function addRetry(item: RetryItem, failed: boolean) {
   }
   // A failed body goes back to the front: replay segments must reach
   // the server in the order they were recorded.
-  if (failed) retryQueue.unshift(next);
+  if (failure) retryQueue.unshift(next);
   else retryQueue.push(next);
   retryBytes += next.body.length;
   schedulePersist();
@@ -436,9 +510,16 @@ function drainRetries() {
     clearTimeout(retryTimer);
     retryTimer = null;
   }
-  if (!getConfig() || !canSend()) return;
+  if (!getConfig() || !canSend() || sendsHeld) return;
   while (retryQueue.length > 0 && inFlight.size < MAX_IN_FLIGHT) {
     const head = retryQueue[0];
+    if (expired(head)) {
+      retryQueue.shift();
+      retryBytes -= head.body.length;
+      incrTelemetry('retry_drops');
+      onDropped(head.carriesReplay);
+      continue;
+    }
     const wait = head.notBefore - Date.now();
     if (wait > 0) {
       retryTimer = setTimeout(() => {
@@ -517,19 +598,41 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
   outboxHasHeld = Object.keys(held).length > 0;
 }
 
-/** Loads the outbox written by an earlier run and queues it to send. */
+/**
+ * Loads the outbox written by an earlier run and queues it to send.
+ *
+ * The file stays until the bodies have their answers (syncOutboxAfterSend
+ * removes it), or the app could end again before they are sent, and lose
+ * them. Events queued before this (the crash that ended the last run,
+ * which native code read and removed) are written to it now, for the same
+ * reason.
+ */
 export function restoreOutbox() {
   const box = storage.getJSON<Outbox | null>(OUTBOX_KEY, null);
-  removeOutbox();
-  if (!box) return;
+  if (!box) {
+    // Nothing to send again. A crash read from native code is queued,
+    // and goes to disk now; it is sent with the next flush.
+    if (Array.from(queues.values()).some((q) => q.items.length > 0)) persistOutbox();
+    return;
+  }
+  const now = Date.now();
   for (const r of box.retry ?? []) {
     if (typeof r.body !== 'string') continue;
-    retryQueue.push({
+    const item: RetryItem = {
+      // An outbox of SDK 0.1.3 has no id or time.
+      id: typeof r.id === 'string' && r.id ? r.id : uuid(),
+      createdAt: typeof r.createdAt === 'number' ? r.createdAt : now,
       body: r.body,
       attempts: 0,
+      failures: 0,
       carriesReplay: !!r.carriesReplay,
       notBefore: 0,
-    });
+    };
+    if (expired(item)) {
+      incrTelemetry('retry_drops');
+      continue;
+    }
+    retryQueue.push(item);
     retryBytes += r.body.length;
   }
   for (const [key, items] of Object.entries(box.held ?? {})) {
@@ -540,6 +643,8 @@ export function restoreOutbox() {
       q.bytes += measure(key, item).bytes;
     }
   }
+  // Writes the outbox again with all of it, or removes an empty one.
+  persistOutbox();
   if (canSend()) {
     flush();
     drainRetries();
@@ -574,6 +679,7 @@ export function resetTransport() {
   retryQueue = [];
   retryBytes = 0;
   outboxOnDisk = outboxHasHeld = false;
+  sendsHeld = false;
   inFlight.clear();
   canSend = () => true;
   replayDropHandler = null;

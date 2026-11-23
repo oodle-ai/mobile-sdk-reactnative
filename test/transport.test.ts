@@ -4,10 +4,12 @@ import { Platform } from 'react-native';
 import { resolveConfig, setConfig } from '../src/core/config';
 import { resetNativeCache, storage } from '../src/core/native';
 import {
+  BATCH_ID_HEADER,
   buildEnvelope,
   clearAll,
   enqueue,
   flush,
+  holdSends,
   pendingCounts,
   persistOutbox,
   resetTransport,
@@ -163,6 +165,126 @@ describe('transport', () => {
     }
   });
 
+  it('keeps sending while offline, and gives up on collector errors only', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    // Offline for twenty minutes: far more than eight failed sends.
+    setPoster(async () => ({ status: 0, rateLimits: null }));
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    expect(pendingCounts().retries).toBe(1);
+    // Back online.
+    setPoster(collectorPoster);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(delivered()).toBe(1);
+
+    // A collector that answers with errors is given up on after eight.
+    status = 503;
+    enqueue('events', { n: 2 });
+    flush();
+    await vi.advanceTimersByTimeAsync(20 * 60_000);
+    expect(sent.filter((s) => JSON.stringify(s.lines).includes('"n":2'))).toHaveLength(9);
+    expect(pendingCounts().retries).toBe(0);
+  });
+
+  it('backs off while offline', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    let tries = 0;
+    setPoster(async () => (tries++, { status: 0, rateLimits: null }));
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    // 1 + 2 + 4 + ... s, then once a minute: about 15 sends, not 600.
+    expect(tries).toBeGreaterThan(8);
+    expect(tries).toBeLessThan(20);
+  });
+
+  it('drops a body it could not send for eighteen hours', async () => {
+    setPoster(async () => ({ status: 0, rateLimits: null }));
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(17 * 3600_000);
+    expect(pendingCounts().retries).toBe(1);
+    await vi.advanceTimersByTimeAsync(2 * 3600_000);
+    expect(pendingCounts().retries).toBe(0);
+  });
+
+  it('sends a body with the same batch id every time', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    status = 503;
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    status = 202;
+    await vi.advanceTimersByTimeAsync(1000);
+    // The outbox keeps the id, so a send after a restart has it too.
+    enqueue('events', { n: 2 });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    const ids = sent.map((s) => s.headers[BATCH_ID_HEADER]);
+    expect(ids).toHaveLength(3);
+    expect(ids[0]).toMatch(/^[0-9a-f-]{36}$/);
+    expect(ids[1]).toBe(ids[0]);
+    expect(ids[2]).not.toBe(ids[0]);
+  });
+
+  it('keeps the batch id of a body in the outbox', async () => {
+    slowPosterFor();
+    enqueue('events', { n: 1 });
+    flush();
+    persistOutbox();
+    const id = (JSON.parse(storage.get('outbox')!) as { retry: Array<{ id: string }> }).retry[0].id;
+    restart();
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(accepted[0].headers[BATCH_ID_HEADER]).toBe(id);
+  });
+
+  it('gives a body from an older outbox an id', async () => {
+    storage.set('outbox', JSON.stringify({ retry: [{ body: buildEnvelope([{ type: 'events', items: [{ n: 1 }] }]), attempts: 3, carriesReplay: false, notBefore: 0 }], held: {} }));
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+    expect(accepted[0].headers[BATCH_ID_HEADER]).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('keeps a restored outbox on disk until it is sent', async () => {
+    setCanSend(() => false);
+    enqueue('events', { n: 1 });
+    persistOutbox();
+    restart();
+    // The app ends again before it can send (offline at start).
+    setPoster(async () => ({ status: 0, rateLimits: null }));
+    restoreOutbox();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(storage.get('outbox')).toContain('n');
+    restart();
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+    expect(storage.get('outbox')).toBeNull();
+  });
+
+  // Native code removes its crash file when JS reads it. Until that crash
+  // is sent, the outbox is its only copy.
+  it('writes a crash queued at start to the outbox', () => {
+    setCanSend(() => true);
+    enqueue('events', { crash: 1 });
+    restoreOutbox();
+    expect(storage.get('outbox')).toContain('crash');
+  });
+
+  it('sends nothing while sends are held', async () => {
+    holdSends(true);
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(sent).toHaveLength(0);
+    holdSends(false);
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+  });
+
   it('drops 4xx without retrying', async () => {
     status = 400;
     enqueue('events', { n: 1 });
@@ -225,6 +347,11 @@ describe('transport', () => {
     expect(delivered()).toBe(1);
   });
 
+  /** A poster that never answers, as in a process that ends while it waits. */
+  function slowPosterFor() {
+    setPoster(() => new Promise<PostResult>(() => {}));
+  }
+
   /** A poster whose answer waits until the test calls `answer()`. */
   function slowPoster() {
     let answer: (status: number) => void = () => {};
@@ -253,6 +380,32 @@ describe('transport', () => {
     restoreOutbox();
     await vi.runAllTimersAsync();
     expect(delivered()).toBe(1);
+  });
+
+  // The collector drops a body whose batch id it already has. Queued items
+  // on disk (a crash read at start) must be sent again in the same body,
+  // with the same id, or the collector stores them twice.
+  it('sends queued items from the outbox again with the same batch id', async () => {
+    const ids: string[] = [];
+    setPoster((url, headers, body) => {
+      if (JSON.stringify(decode(body)).includes('"n":1')) ids.push(headers[BATCH_ID_HEADER]);
+      // The process ends before the answer comes.
+      return new Promise<PostResult>(() => {});
+    });
+    enqueue('events', { n: 1 });
+    restoreOutbox();
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    restart();
+    setPoster((url, headers, body) => {
+      if (JSON.stringify(decode(body)).includes('"n":1')) ids.push(headers[BATCH_ID_HEADER]);
+      return collectorPoster(url, headers, body);
+    });
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(ids).toHaveLength(2);
+    expect(ids[1]).toBe(ids[0]);
+    expect(storage.get('outbox')).toBeNull();
   });
 
   it('keeps queued items on disk when another body is answered after a fatal error', async () => {

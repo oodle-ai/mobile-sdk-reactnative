@@ -31,10 +31,15 @@ object ExitReasons {
     val exits = am.getHistoricalProcessExitReasons(context.packageName, 0, 16).filter { it.processName == processName }
     val last = storage.get(LAST_EXIT_KEY)?.toLongOrNull()
     val newest = exits.maxOfOrNull { it.timestamp } ?: 0L
-    if (newest > (last ?: 0L)) storage.set(LAST_EXIT_KEY, newest.toString())
     // On the first start with the SDK, the exits are from before the SDK
-    // was installed and have no session to attach to.
-    if (last == null) return null
+    // was installed and have no session to attach to. The mark is set even
+    // when there are none (a new install), or the first crash after it
+    // would be taken for one from before the SDK, and dropped.
+    if (last == null) {
+      storage.set(LAST_EXIT_KEY, maxOf(newest, System.currentTimeMillis()).toString())
+      return null
+    }
+    if (newest > last) storage.set(LAST_EXIT_KEY, newest.toString())
     val exit =
       exits
         .filter { it.timestamp > last }

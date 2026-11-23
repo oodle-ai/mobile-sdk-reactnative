@@ -514,6 +514,19 @@ describe('OodleRum end to end', () => {
 
   // Keep this test last: it starts the transport again, as a new start
   // of the app does.
+  it('sends a crash after an error storm that used up the rate limit', async () => {
+    const { emit } = await import('../src/events/emit');
+    for (let i = 0; i < 300; i++) sdk.OodleRum.addError(new Error(`storm ${i}`));
+    emit({ event_type: 'error', exception_message: 'storm crash', error_is_crash: 1, error_source: 'native' });
+    await settle();
+    const errors = events('error');
+    // The bucket holds 200, and the crash is sent after them all.
+    expect(errors.filter((e) => String(e.exception_message).startsWith('storm ')).length).toBeLessThanOrEqual(201);
+    expect(errors.find((e) => e.exception_message === 'storm crash')).toBeDefined();
+    // Later tests start with a full bucket.
+    await vi.advanceTimersByTimeAsync(10_000);
+  });
+
   it('sends a fatal JS error once, on the next start', async () => {
     const crashes = () =>
       history
