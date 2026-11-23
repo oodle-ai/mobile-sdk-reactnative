@@ -27,6 +27,35 @@ rules, or sessions and views are counted wrong:
   collector maps the OpenTelemetry names to its RUM columns and derives
   those fields.
 
+## Sending: lose nothing, send nothing twice
+
+An app release is the only way to fix a shipped SDK, so the transport
+keeps these rules (`src/core/transport.ts`):
+
+- Only answers from the collector (429, 5xx) count toward
+  `MAX_RETRY_ATTEMPTS`. A send that cannot reach the collector (offline,
+  a timeout) backs off and tries again until the body is
+  `MAX_RETRY_AGE_MS` old. A phone can be offline for hours.
+- Every body has an id that stays the same on every send and across
+  restarts (`X-Oodle-Batch-Id`). A body is sent again when its answer was
+  lost: the app was suspended or ended while it waited. No client can
+  prevent that (other mobile RUM SDKs send a batch again too, with an
+  idempotency key), so the collector must store a body with the
+  same id once. `scripts/mock-collector.mjs` does that, and the CI checks
+  fail on an event that arrives in two bodies with different ids.
+- The outbox on disk is the only copy of what it holds. Remove it only
+  when the bodies in it have answers (`syncOutboxAfterSend`). A restored
+  outbox stays until then, and a crash read from native code (which
+  removes its file) is written to it at start.
+- Queued items in the outbox (a crash read at start, events held after a
+  fatal error) go into a body with the next flush. The outbox is written
+  again at once, so it holds them in that body with its id. Otherwise the
+  next start sends them in a body with a new id.
+- From a fatal JS error until the handoff, nothing is sent
+  (`holdSends`): the crash is on disk, and a send just before the process
+  ends would be sent again by the next start.
+- A crash (`error_is_crash: 1`) is never rate limited.
+
 ## Replay is rrweb
 
 Native code returns wireframes; `src/replay/rrweb.ts` turns them into

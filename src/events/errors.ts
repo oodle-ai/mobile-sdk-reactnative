@@ -1,7 +1,7 @@
 import { appBuild, loadLastContext, saveLastContext, staticFields } from '../core/context';
 import { LOG_PREFIX } from '../core/logger';
 import { native, storage, type NativeCrash } from '../core/native';
-import { persistOutbox } from '../core/transport';
+import { holdSends, persistOutbox } from '../core/transport';
 import { attributesJSON, emit, emitRaw } from './emit';
 import { isoTime } from '../core/clock';
 
@@ -131,6 +131,9 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
       storage.set(JS_CRASH_MARKER_KEY, String(Date.now()));
       saveLastContext();
       persistOutbox({ sync: true });
+      // The crash is on disk, and the next start sends it. A flush in
+      // the handoff could send it too, and it would count two times.
+      holdSends(true);
     }
   } catch {
     // never stop the app's own handler from running
@@ -145,6 +148,9 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
   setTimeout(() => {
     fatalPending = false;
     next(error, isFatal);
+    // A handler that did not end the app (a dev build shows the error
+    // and goes on): send again.
+    holdSends(false);
   }, FATAL_HANDOFF_DELAY_MS);
 }
 

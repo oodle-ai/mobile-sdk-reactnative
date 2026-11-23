@@ -68,7 +68,9 @@ export function emit(data: EventData, activity = true) {
   if (!getSession(activity).sampled) return;
   if (isServerRateLimited('events')) return;
   const type = String(data.event_type ?? '');
-  if (RATE_LIMITED.has(type)) {
+  // A crash is the event a storm of errors leads to, and the one most
+  // needed: it is never rate limited.
+  if (RATE_LIMITED.has(type) && data.error_is_crash !== 1) {
     if (isServerRateLimited(type) || !tryConsume(type)) {
       incrTelemetry('events_rate_limited');
       return;

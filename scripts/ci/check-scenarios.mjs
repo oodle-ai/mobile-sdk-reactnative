@@ -72,6 +72,9 @@ if (ran.includes('offline')) {
   }
 }
 
+// The mock collector stores a body with the same batch id once, as the
+// collector does. An event that arrives twice came in two bodies with
+// different ids: the collector cannot drop the second, so it counts twice.
 const uids = events.map((e) => e.log_record_uid);
 const duplicates = uids.length - new Set(uids).size;
 check(duplicates === 0, `no event arrived twice (${duplicates} duplicates)`);
