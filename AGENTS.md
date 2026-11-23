@@ -150,7 +150,7 @@ device log in `scenarios-logcat.txt` in the collector artifact. A crash handler 
 crash on breaks the other SDK, and that is what customers who move from
 Datadog run.
 
-The `Compare with Datadog` workflow (`scripts/compare/run.sh`, each week
+The `Compare with Datadog` workflow (`scripts/compare/run.sh`, each day
 and on request) runs the same fixture build with a soak walk
 (`fixtures/fieldwork/src/soak.ts`) from a seed. The scenario chooses the
 SDKs of each launch (`provider`: `none`, `oodle`, `datadog`, `both`) and

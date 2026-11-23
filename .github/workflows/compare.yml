@@ -9,11 +9,11 @@ name: Compare with Datadog
 #   cost    no SDK, Oodle and Datadog in turn on the same walks: CPU,
 #           memory, start time, frames, bytes and requests of each.
 # Each job writes its reports to the job summary and keeps the collector
-# data as an artifact. It takes longer than CI, so it runs each week and
+# data as an artifact. It takes longer than CI, so it runs each day and
 # on request, not on each pull request.
 on:
   schedule:
-    - cron: '0 3 * * 1'
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       parity_launches:
