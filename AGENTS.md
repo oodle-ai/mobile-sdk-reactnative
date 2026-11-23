@@ -57,6 +57,10 @@ keeps these rules (`src/core/transport.ts`):
   (`holdSends`): the crash is on disk, and a send just before the process
   ends would be sent again by the next start.
 - A crash (`error_is_crash: 1`) is never rate limited.
+- On the way to the background the outbox is written synchronously, as
+  on a fatal error. A backgrounded app can get so little CPU that a write
+  on a native background queue does not run before iOS ends it (seen on
+  the CI runners); the events sent on the way out were then lost.
 - The retry queue is oldest first. While a body waits (a backoff after a
   failure), a new body waits behind it: sent at once, it fails too while
   offline, and replay segments must arrive in order. At the size limits
@@ -89,7 +93,10 @@ A return to the app goes on with the view it left, with its id and start,
 and its time spent includes the time away. Only a session that ended while
 the app was away gives a new view. The update sent on the way to the
 background keeps the view open: readers take a view's vitals from its
-closing update, so closing it twice counts it twice.
+closing update, so closing it twice counts it twice. Each view is closed
+once, also when its session ended first (an idle screen, a long time
+away): the closing update goes out on the view's own session
+(`emitViewUpdate`), and is not activity.
 
 ## Replay is rrweb
 
@@ -128,6 +135,14 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 - The JS handler passes a fatal error on after `FATAL_HANDOFF_DELAY_MS`.
   React Native's handler ends the process, and a crash reporter earlier
   in the chain (Datadog) writes its report on native queues.
+- The iOS signal handler runs on an alternate stack (a stack overflow
+  leaves no room on the thread stack), so it reads the crashed stack from
+  the signal context, not with backtrace(). It calls the handler installed
+  before it, and keeps an alternate stack that another reporter set.
+  `ios/OodleCrashReporter.m` can be tested on macOS: it uses Foundation
+  only.
+- SDK files are kept out of device backups: iOS excludes its directory,
+  Android uses `noBackupFilesDir` (`Storage.directory`).
 
 ## Tests
 

@@ -55,8 +55,12 @@ function toBackground() {
   saveLastContext();
   flushSession();
   flush();
-  // The OS can end a background app without warning.
-  persistOutbox();
+  // The OS can end a background app without warning, and a backgrounded
+  // app can get so little CPU that a write queued on a native background
+  // queue does not run before that: the events of this moment, sent just
+  // now and not answered yet, were then lost. The write is done now, while
+  // the JS thread runs; the app draws no frames in the background.
+  persistOutbox({ sync: true });
 }
 
 function toForeground() {

@@ -15,11 +15,21 @@
 - A return to the app goes on with the view it left, with its id and
   start, as Datadog does. Only a session that ended while the app was
   away gives a new view.
+- A view open when its session ends (an idle screen, a long time away)
+  is closed in that session, with `view_is_active: 0` and its full time
+  spent, when the next activity starts a new session. Before, its closing
+  update was dropped and the view stayed open.
 - A tap is named by the component that has the press handler
   (`Pressable`, `TouchableOpacity`), not by the `View` it renders.
 
 ### Privacy
 
+- The default `textAndInputPrivacy` is now `'mask-all'`, as in Datadog's
+  mobile SDKs (was `'mask-all-inputs'`). Replays show no text of the app
+  unless the app allows it. Tap actions then have no text label either:
+  a tap is named by its `oodle-action-name` prop, or else by its component
+  (`Pressable`). To keep the 0.1.3 behavior, set
+  `sessionReplay: { textAndInputPrivacy: 'mask-all-inputs' }`.
 - Tap actions follow the replay privacy rules. Inside an `OodlePrivacy`
   view of level `hidden` or `mask`, and anywhere under `mask-all` (except
   in an `allow` view), a tap is named only by its `oodle-action-name` prop
@@ -33,8 +43,10 @@
   part ends. `https://api.example.com` no longer matches
   `https://api.example.com.evil.net`, so that host does not get trace
   headers.
-- On iOS the SDK directory (outbox, session, saved user) is excluded from
-  backups.
+- The SDK files (outbox, session, saved user, crash) are not in device
+  backups. On iOS their directory is excluded from backups. On Android
+  they moved to `noBackupFilesDir`; the old directory in `filesDir` is
+  deleted.
 
 ### Sending
 
@@ -46,6 +58,10 @@
   flush sent a new request while offline. The retry queue stays oldest
   first, so replay segments arrive in the order they were recorded, and
   the oldest bodies are dropped first at the size limit.
+- The outbox is written at once when the app goes to the background, not
+  on a background queue. A backgrounded app can get too little CPU for
+  the queued write to run before the OS ends it, and the events sent on
+  the way out were lost.
 - The outbox write escapes each body once, not on every write. Offline
   with replay on, this cost the JS thread most.
 - A session is counted when `beforeSend` drops its first event: the next
@@ -64,6 +80,11 @@
 
 - iOS: when a crash signal comes again after the handler installed before
   the SDK returned, the process now ends instead of looping.
+- iOS: a stack overflow crash is recorded. The signal handler runs on an
+  alternate stack on the main thread and on the thread that installs it
+  (a thread that has one already, from KSCrash, keeps it). The stack of a
+  signal crash now comes from the crash context: it starts at the crashing
+  instruction and includes the caller of a leaf function.
 - Android: the JVM crash file is written atomically, so a crash is not
   lost when the process ends during the write.
 - `init()` no longer throws into the app. On an unexpected error it

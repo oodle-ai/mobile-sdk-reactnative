@@ -24,7 +24,7 @@ object CrashReporter {
   @Synchronized
   fun install(context: Context, storage: Storage): Boolean {
     if (installed) return true
-    val dir = File(context.applicationContext.filesDir, Storage.DIR).apply { mkdirs() }
+    val dir = Storage.directory(context).apply { mkdirs() }
     val previous = Thread.getDefaultUncaughtExceptionHandler()
     Thread.setDefaultUncaughtExceptionHandler { thread, error ->
       try {
@@ -86,7 +86,7 @@ object CrashReporter {
    */
   fun consume(context: Context, storage: Storage): String? {
     val fromSystem = ExitReasons.consume(context.applicationContext, storage)
-    val f = File(File(context.applicationContext.filesDir, Storage.DIR), CRASH_FILE)
+    val f = File(Storage.directory(context), CRASH_FILE)
     if (!f.exists()) return fromSystem
     val text = f.readText(Charsets.UTF_8)
     f.delete()

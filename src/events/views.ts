@@ -29,6 +29,8 @@ interface VitalsAcc {
 
 interface ActiveView extends ViewInfo {
   sessionId: string;
+  /** The session of the view is sampled; its updates are sent. */
+  sampled: boolean;
   startMs: number;
   loadingType: 'initial_load' | 'route_change';
   /** Update number; readers keep the highest per view. */
@@ -164,7 +166,7 @@ function send(v: ActiveView, final: boolean) {
   if (attrs) data.event_attributes = attrs;
   // Only the active view is sent, and a view's last update is sent before
   // the next view becomes current, so the event context is this view.
-  emitViewUpdate(data);
+  emitViewUpdate(data, { sessionId: v.sessionId, sampled: v.sampled, closing: final });
 }
 
 /** Counts an event in the view it happened in, and sends the view soon. */
@@ -250,11 +252,12 @@ export function startView(
   const { url, path } = viewUrlFor(viewName);
   // Start or renew the session first, so a renewal cannot restart the
   // view that is being created here.
-  const sessionId = getSession(true).id;
+  const session = getSession(true);
   if (getConfig()?.vitals) native.collectVitals(); // reset the interval
   const view: ActiveView = {
     id: uuid(),
-    sessionId,
+    sessionId: session.id,
+    sampled: session.sampled,
     key,
     name: viewName,
     url,
@@ -363,6 +366,8 @@ export function resumeViews() {
   const v = paused;
   paused = null;
   if (isSessionExpired() || peekSession()?.id !== v.sessionId) {
+    // The view the app left closes in its own session, which has ended.
+    send(v, true);
     startView(v.key, v.name, v.attributes);
     return;
   }
@@ -379,10 +384,13 @@ export function resumeViews() {
 /** Session ended: the open view belongs to the old session. */
 export function restartViewForNewSession(sessionId: string) {
   if (!active || active.sessionId === sessionId) return;
-  const { key, name, attributes } = active;
+  const old = active;
   active = null;
   stopRefreshTimer();
-  startView(key, name, attributes);
+  // The old view closes in the old session, then the screen starts again
+  // as a view of the new one.
+  send(old, true);
+  startView(old.key, old.name, old.attributes);
 }
 
 export function flushActiveView() {

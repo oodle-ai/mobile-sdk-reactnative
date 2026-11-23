@@ -12,7 +12,7 @@ describe('resolveConfig', () => {
     expect(config!.replay).toMatchObject({
       enabled: true,
       sampleRate: 10,
-      textAndInputPrivacy: 'mask-all-inputs',
+      textAndInputPrivacy: 'mask-all',
       touchPrivacy: 'show',
       startRecordingImmediately: true,
     });
