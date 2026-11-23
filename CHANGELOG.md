@@ -13,7 +13,7 @@
   starts or extends a session. An app left open on one screen no longer
   starts a new session every 15 minutes.
 - A return to the app goes on with the view it left, with its id and
-  start, as the reference SDK does. Only a session that ended while the app was
+  start, as other mobile RUM SDKs do. Only a session that ended while the app was
   away gives a new view.
 - A view open when its session ends (an idle screen, a long time away)
   is closed in that session, with `view_is_active: 0` and its full time
@@ -24,8 +24,8 @@
 
 ### Privacy
 
-- The default `textAndInputPrivacy` is now `'mask-all'`, as in the reference SDK's
-  mobile SDKs (was `'mask-all-inputs'`). Replays show no text of the app
+- The default `textAndInputPrivacy` is now `'mask-all'`, as in other
+  mobile RUM SDKs (was `'mask-all-inputs'`). Replays show no text of the app
   unless the app allows it. Tap actions then have no text label either:
   a tap is named by its `oodle-action-name` prop, or else by its component
   (`Pressable`). To keep the 0.1.3 behavior, set

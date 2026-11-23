@@ -128,7 +128,7 @@ function hasHandler(f: FiberLike): boolean {
 /**
  * The component that owns the press handler, from the fiber found
  * pressable up to a few levels above it: Pressable, TouchableOpacity,
- * Button, and so on, as the reference SDK names a tap. Pressable passes its role to
+ * Button, and so on, as other RUM SDKs name a tap. Pressable passes its role to
  * the View it renders, and that View is found first, so the name was
  * "View" for every Pressable.
  */

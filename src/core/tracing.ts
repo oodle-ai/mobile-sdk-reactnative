@@ -43,8 +43,8 @@ export function tracingHeaders(
       out['x-b3-spanid'] = ids.spanId;
       out['x-b3-sampled'] = ids.sampled ? '1' : '0';
     } else if (p === 'datadog') {
-      // The reference SDK ids are the low 64 bits in decimal; the high 64 bits go
-      // in x-datadog-tags.
+      // In this format the ids are the low 64 bits in decimal; the high
+      // 64 bits go in the tags header.
       const traceLow = hexToDecimal(ids.traceId.slice(16));
       const parent = hexToDecimal(ids.spanId);
       if (traceLow && parent) {

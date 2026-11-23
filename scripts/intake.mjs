@@ -1,5 +1,5 @@
 // Parsers for the bodies that the mock collector (mock-collector.mjs)
-// receives: the Oodle NDJSON envelope, and the reference RUM and Session
+// receives: the Oodle NDJSON envelope, and the reference SDK's RUM and Session
 // Replay uploads of the reference SDK that the Fieldwork fixture runs next
 // to Oodle. test/intake.test.ts covers them.
 import zlib from 'node:zlib';
@@ -39,7 +39,7 @@ export function parseEnvelope(text) {
 }
 
 /**
- * The events of a reference RUM upload: one JSON event per line. The
+ * The events of a reference SDK RUM upload: one JSON event per line. The
  * reference SDK also sends its own telemetry to the RUM intake; those
  * events are left out.
  */
@@ -103,7 +103,7 @@ const tryJson = (buf) => {
 };
 
 /**
- * The segments of a reference Session Replay upload. The SDK sends each
+ * The segments of a reference SDK Session Replay upload. The SDK sends each
  * segment as zlib data in a `segment` part, and their metadata as a JSON
  * list in an `event` part. An older format sends the metadata of one
  * segment as plain form fields (`session.id`, `has_full_snapshot`, ...).

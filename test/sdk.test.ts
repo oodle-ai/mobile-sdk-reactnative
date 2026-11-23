@@ -558,7 +558,7 @@ describe('OodleRum end to end', () => {
     await settle();
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background', 'foreground']);
     expect(events('error').find((e) => e.error_source === 'anr')).toMatchObject({ exception_type: 'ANR' });
-    // One view with its start, as the reference SDK counts it: its time spent
+    // One view with its start, as other RUM SDKs count it: its time spent
     // includes the minute away.
     const notif = events('view').filter((v) => v.app_screen_name === 'Notifications');
     expect(new Set(notif.map((v) => v.view_id)).size).toBe(1);
@@ -623,7 +623,7 @@ describe('OodleRum end to end', () => {
   });
 
   // An app left open on one screen: the view refresh, replay and the
-  // app's own requests run on, and the reference SDK starts no new session.
+  // app's own requests run on, and other RUM SDKs start no new session.
   it('starts no session while the app sits idle, and one at the next tap', async () => {
     sdk.OodleRum.startView('idle-key', 'Idle');
     await settle();

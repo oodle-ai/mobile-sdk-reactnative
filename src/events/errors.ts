@@ -118,7 +118,7 @@ function errorUtils(): ErrorUtilsLike | null {
  *
  * A fatal error goes to the next handler after FATAL_HANDOFF_DELAY_MS.
  * React Native's own handler ends the process, and another crash reporter
- * earlier in the chain (the reference SDK) writes its report on native
+ * earlier in the chain (another RUM SDK) writes its report on native
  * background queues. Without the wait, its report can be lost. Oodle's
  * report is already on disk, so the wait does not risk it.
  */

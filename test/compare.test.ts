@@ -1,4 +1,4 @@
-// The Oodle and reference comparison (scripts/compare/): the parsers of the
+// The Oodle and the reference SDK comparison (scripts/compare/): the parsers of the
 // mock collector, and the collector, parity.mjs and cost.mjs together, on
 // bodies shaped like the ones each SDK sends.
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
@@ -53,14 +53,14 @@ describe('intake parsers', () => {
     expect(parts[1].filename).toBe('f');
   });
 
-  it('reads reference replay segments with their metadata', () => {
+  it('reads reference SDK replay segments with their metadata', () => {
     const { body, contentType } = referenceReplayBody('ref-s1', 4);
     const [seg] = parseReferenceReplay(body, contentType);
     expect(seg).toMatchObject({ session_id: 'ref-s1', view_id: 'v1', records_count: 4, has_full_snapshot: true });
     expect(seg.decoded_bytes).toBeGreaterThan(seg.compressed_bytes / 2);
   });
 
-  it('reads a reference replay segment without metadata from the segment', () => {
+  it('reads a reference SDK replay segment without metadata from the segment', () => {
     const segment = { session: { id: 'ref-s2' }, view: { id: 'v9' }, has_full_snapshot: false, records: [{}, {}] };
     const { body, contentType } = multipart([
       { name: 'segment', filename: 'ref-s2', type: 'application/octet-stream', data: zlib.deflateSync(JSON.stringify(segment)) },
@@ -68,7 +68,7 @@ describe('intake parsers', () => {
     expect(parseReferenceReplay(body, contentType)[0]).toMatchObject({ session_id: 'ref-s2', view_id: 'v9', records_count: 2, has_full_snapshot: false });
   });
 
-  it('reads reference RUM events and leaves out SDK telemetry and bad lines', () => {
+  it('reads reference SDK RUM events and leaves out SDK telemetry and bad lines', () => {
     const text = [JSON.stringify({ type: 'view' }), JSON.stringify({ type: 'telemetry' }), '{bad', ''].join('\n');
     const { events, bad } = parseReferenceRum(text);
     expect(events).toEqual([{ type: 'view' }]);
@@ -122,7 +122,7 @@ async function startCollector(out: string) {
       });
     },
     reference: (events: object[]) =>
-      post('/reference/rum?ddsource=react-native', zlib.gzipSync(events.map((e) => JSON.stringify(e)).join('\n')), { 'content-encoding': 'gzip' }),
+      post('/reference/rum', zlib.gzipSync(events.map((e) => JSON.stringify(e)).join('\n')), { 'content-encoding': 'gzip' }),
     referenceReplay: (session: string) => {
       const { body, contentType } = referenceReplayBody(session);
       return post('/reference/replay', body, { 'content-type': contentType });

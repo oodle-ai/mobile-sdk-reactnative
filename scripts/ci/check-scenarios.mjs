@@ -38,7 +38,7 @@ function scenarioSession(name) {
   return armed[0]?.session_id;
 }
 
-/** reference uploads made during a scenario run and the start after it. */
+/** Reference SDK uploads made during a scenario run and the start after it. */
 const referenceBodies = (name) =>
   reference
     .filter((u) => u.scenario === name || u.scenario === `after-${name}`)

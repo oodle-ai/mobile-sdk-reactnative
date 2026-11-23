@@ -134,7 +134,7 @@ let failed = 0;
 const lines = [
   `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches)`,
   '',
-  '| Check | Level | Result | Differs in | Example (Oodle / the reference SDK) |',
+  '| Check | Level | Result | Differs in | Example (Oodle / reference) |',
   '|---|---|---|---|---|',
 ];
 for (const [name, { level, rows }] of results) {

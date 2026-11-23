@@ -11,7 +11,7 @@ set -euo pipefail
 RN_VERSION="${1:?React Native version}"
 TARBALL="$(cd "$(dirname "${2:?SDK tarball}")" && pwd)/$(basename "$2")"
 PROVIDER="${3:-both}"
-# The reference version of the Fieldwork One demo.
+# The reference SDK version of the Fieldwork One demo.
 REFERENCE_SDK_VERSION="3.12.0"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 WORK="${RUNNER_TEMP:-/tmp}/oodle-fixture"
