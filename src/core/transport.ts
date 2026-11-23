@@ -8,14 +8,22 @@ import { INTERNAL_REQUEST } from './internal';
 import { logger } from './logger';
 import { native, storage } from './native';
 import { estimateJsonBytes } from './size';
+import { buildTraceBody } from './otlp';
 import { incrTelemetry } from './telemetry';
 
 type Payload = Record<string, unknown>;
 
 export const INGEST_PATH = '/v1/rum/ingest';
+/** The client spans, as OTLP/JSON (the browser SDK's trace path). */
+export const TRACES_PATH = '/v1/rum/traces';
 export const EVENTS_BATCH_KEY = 'events';
 export const REPLAY_BATCH_KEY = 'replay';
 export const TELEMETRY_BATCH_KEY = 'sdk_telemetry';
+/**
+ * Client spans. They are not a section of the envelope: they go in a
+ * body of their own to TRACES_PATH, through the same retries and outbox.
+ */
+export const SPANS_BATCH_KEY = 'spans';
 
 const MAX_BATCH_ITEMS = 50;
 const MAX_BATCH_BYTES = 500_000;
@@ -58,6 +66,8 @@ interface Queue {
 interface RetryItem {
   /** The same on every send of the body: BATCH_ID_HEADER. */
   id: string;
+  /** The collector path: INGEST_PATH, or TRACES_PATH for spans. */
+  path: string;
   /** When the body was built, for MAX_RETRY_AGE_MS. */
   createdAt: number;
   body: string;
@@ -298,6 +308,14 @@ export function buildEnvelope(
   return lines.join('\n');
 }
 
+function takeQueue(key: string): Payload[] {
+  const q = queues.get(key);
+  if (!q || q.items.length === 0) return [];
+  q.upsertIndex.clear();
+  q.bytes = 0;
+  return q.items.splice(0);
+}
+
 function takeSections(): Array<{ type: string; items: Payload[] }> {
   const keys = Array.from(queues.keys()).sort((a, b) => {
     const ai = FLUSH_ORDER.indexOf(a);
@@ -306,6 +324,7 @@ function takeSections(): Array<{ type: string; items: Payload[] }> {
   });
   const sections: Array<{ type: string; items: Payload[] }> = [];
   for (const key of keys) {
+    if (key === SPANS_BATCH_KEY) continue;
     const q = queues.get(key)!;
     if (q.items.length === 0) continue;
     sections.push({ type: key, items: q.items.splice(0) });
@@ -322,12 +341,44 @@ export function flush() {
     flushTimer = null;
   }
   if (!getConfig() || !canSend() || sendsHeld) return;
+  const bodies: RetryItem[] = [];
   const sections = takeSections();
-  if (sections.length === 0) return;
-  const body = buildEnvelope(sections);
-  const carriesReplay = sections.some((s) => s.type === REPLAY_BATCH_KEY);
-  const item: RetryItem = {
+  if (sections.length > 0) {
+    const carriesReplay = sections.some((s) => s.type === REPLAY_BATCH_KEY);
+    bodies.push(newBody(INGEST_PATH, buildEnvelope(sections), carriesReplay));
+  }
+  const spans = takeQueue(SPANS_BATCH_KEY);
+  if (spans.length > 0) {
+    bodies.push(newBody(TRACES_PATH, buildTraceBody(spans, { name: SCOPE_NAME, version: SDK_VERSION }), false));
+  }
+  if (bodies.length === 0) return;
+  for (const item of bodies) {
+    if (retryQueue.length > 0) {
+      // Older bodies wait, maybe for the backoff after a failure (offline).
+      // The new body goes after them: sent now, it would fail too while
+      // offline, and replay segments must arrive in the order recorded.
+      addRetry(item);
+      drainRetries();
+    } else {
+      // sendBody puts the body in flight (or in the retry queue) before it
+      // waits for the answer.
+      void sendBody(item);
+    }
+  }
+  // The outbox holds the items of this body as queued items. If the app
+  // ends before the outbox is written again, the next start sends them in
+  // a body with a new id, which the collector cannot tell from a new
+  // body. Written now, the outbox holds them in this body, with its id.
+  if (outboxHasHeld) persistOutbox();
+}
+
+/** The instrumentation scope of the client spans. */
+const SCOPE_NAME = '@oodle-ai/mobile-sdk-reactnative';
+
+function newBody(path: string, body: string, carriesReplay: boolean): RetryItem {
+  return {
     id: uuid(),
+    path,
     createdAt: Date.now(),
     body,
     attempts: 0,
@@ -336,22 +387,6 @@ export function flush() {
     notBefore: 0,
     seq: nextSeq++,
   };
-  if (retryQueue.length > 0) {
-    // Older bodies wait, maybe for the backoff after a failure (offline).
-    // The new body goes after them: sent now, it would fail too while
-    // offline, and replay segments must arrive in the order recorded.
-    addRetry(item);
-    drainRetries();
-  } else {
-    // sendBody puts the body in flight (or in the retry queue) before it
-    // waits for the answer.
-    void sendBody(item);
-  }
-  // The outbox holds the items of this body as queued items. If the app
-  // ends before the outbox is written again, the next start sends them in
-  // a body with a new id, which the collector cannot tell from a new
-  // body. Written now, the outbox holds them in this body, with its id.
-  if (outboxHasHeld) persistOutbox();
 }
 
 /**
@@ -446,7 +481,7 @@ async function sendBody(item: RetryItem): Promise<void> {
   try {
     const sentAt = Date.now();
     logger.debug('send', item.id.slice(0, 8), item.body.length);
-    const res = await post(`${config.endpoint}${INGEST_PATH}`, headers(item), item.body);
+    const res = await post(`${config.endpoint}${item.path}`, headers(item), item.body);
     logger.debug('answer', item.id.slice(0, 8), res.status, Date.now() - sentAt);
     if (gen !== generation) {
       // Consent was withdrawn while the body was sent.
@@ -525,7 +560,8 @@ function retryItemJson(r: RetryItem): string {
     bodyJson.set(r.id, body);
   }
   return (
-    `{"id":${JSON.stringify(r.id)},"createdAt":${r.createdAt},"body":${body},` +
+    // The path is one of two constants, with nothing to escape.
+    `{"id":${JSON.stringify(r.id)},"path":"${r.path}","createdAt":${r.createdAt},"body":${body},` +
     `"attempts":${r.attempts},"failures":${r.failures},` +
     `"carriesReplay":${r.carriesReplay},"notBefore":0}`
   );
@@ -737,6 +773,8 @@ function loadOutbox(): boolean {
     const item: RetryItem = {
       // An outbox of SDK 0.1.3 has no id or time.
       id: typeof r.id === 'string' && r.id ? r.id : uuid(),
+      // An outbox of SDK 0.1.4 and earlier holds RUM bodies only.
+      path: r.path === TRACES_PATH ? TRACES_PATH : INGEST_PATH,
       createdAt: typeof r.createdAt === 'number' ? r.createdAt : now,
       body: r.body,
       attempts: 0,

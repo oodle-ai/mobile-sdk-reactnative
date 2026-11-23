@@ -31,6 +31,28 @@ rules, or sessions and views are counted wrong:
   collector maps the OpenTelemetry names to its RUM columns and derives
   those fields.
 
+## Client spans are OTLP, on the browser SDK's trace path
+
+For each sampled request that gets trace headers, the SDK sends a client
+span (`src/events/spans.ts`) to `/v1/rum/traces` as OTLP/JSON, the path
+and format of the browser SDK's OpenTelemetry exporter. The collector
+reads it as any OTLP trace request, so it is not in
+`scripts/collector-fields.json`.
+
+- The span's ids are the ids in the request's trace headers: the
+  backend's spans are its children.
+- A span is sent only for a trace that Oodle started, or that the
+  reference SDK started when both run (that SDK sends its span to its own
+  backend). A `traceparent` that the app set comes from the app's own
+  tracer, which sends that span; a second one would be a duplicate.
+- Spans are queued under `SPANS_BATCH_KEY` and flushed as a body of their
+  own (`buildTraceBody`), with the same retries, batch id and outbox as
+  the envelope. A body in the outbox keeps its path. The collector stores
+  a trace body again when it comes again; only `/v1/rum/ingest` is stored
+  once by its batch id.
+- `url.full` has no query string, fragment or user info: `beforeSend`
+  does not see spans.
+
 ## Sending: lose nothing, send nothing twice
 
 An app release is the only way to fix a shipped SDK, so the transport

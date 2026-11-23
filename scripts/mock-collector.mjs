@@ -4,6 +4,8 @@
 // same X-Oodle-Batch-Id only once, and writes:
 //   <out>/events.ndjson               one event per line
 //   <out>/replay/<session>/seg-NNNNNN one replay segment per file (rrweb events)
+//   <out>/spans.ndjson                one client span per line (OTLP/JSON from
+//                                     /v1/rum/traces), with its resource attributes
 //   <out>/requests.ndjson             one line per upload of either SDK: its
 //                                     bytes on the wire, events, segments and
 //                                     delivery lag (scripts/compare/ reads it),
@@ -49,6 +51,7 @@ const requestsFile = path.join(out, 'requests.ndjson');
 const referenceFile = path.join(out, 'reference.ndjson');
 const referenceEventsFile = path.join(out, 'reference-events.ndjson');
 const referenceReplayFile = path.join(out, 'reference-replay.ndjson');
+const spansFile = path.join(out, 'spans.ndjson');
 
 const DEFAULT_SCENARIO = { name: 'none', order: 'oodle-first', offline: false };
 let scenario = DEFAULT_SCENARIO;
@@ -184,6 +187,34 @@ async function handleIngest(req, res) {
   res.writeHead(202).end();
 }
 
+/**
+ * The client spans (OTLP/JSON on /v1/rum/traces). The collector does not
+ * store a trace body once by its batch id (only /v1/rum/ingest does), so
+ * a second copy is stored again here too, and logged as a duplicate.
+ */
+async function handleTraces(req, res) {
+  const raw = await readBody(req);
+  if (!req.headers['x-api-key'] || !req.headers['x-oodle-instance']) {
+    res.writeHead(401).end('missing X-API-KEY or X-OODLE-INSTANCE');
+    console.log('401 missing auth headers');
+    return;
+  }
+  const body = decompress(raw, req.headers['content-encoding']);
+  const request = JSON.parse(body.toString('utf8'));
+  const rows = [];
+  for (const rs of request.resourceSpans ?? []) {
+    const resource = Object.fromEntries((rs.resource?.attributes ?? []).map((a) => [a.key, Object.values(a.value)[0]]));
+    for (const ss of rs.scopeSpans ?? []) for (const span of ss.spans ?? []) rows.push({ resource, span });
+  }
+  appendLines(spansFile, rows);
+  const batchId = req.headers['x-oodle-batch-id'];
+  const duplicate = Boolean(batchId && seenBatches.has(batchId));
+  if (batchId) seenBatches.add(batchId);
+  logRequest({ sdk: 'oodle', kind: 'traces', raw_bytes: raw.length, decoded_bytes: body.length, spans: rows.length, ...(duplicate ? { duplicate } : {}) });
+  console.log(`${new Date().toISOString()} batch ${String(batchId ?? '-').slice(0, 8)} spans x${rows.length}${duplicate ? ' (again)' : ''}`);
+  res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
+}
+
 const server = http.createServer((req, res) => {
   const route = req.url.startsWith('/fixture/scenario')
     ? handleFixture
@@ -191,7 +222,9 @@ const server = http.createServer((req, res) => {
       ? null
       : req.url.startsWith('/v1/rum/ingest')
         ? handleIngest
-        : req.url.startsWith('/reference/')
+        : req.url.startsWith('/v1/rum/traces')
+          ? handleTraces
+          : req.url.startsWith('/reference/')
           ? handleReference
           : null;
   if (!route) {

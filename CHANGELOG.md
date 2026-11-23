@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.5
 
 ### Changes that alter the counts
 
@@ -16,6 +16,12 @@
 
 ### Tracing
 
+- The SDK sends a client span (OpenTelemetry, kind client) for each
+  sampled request that gets trace headers, to `/v1/rum/traces` as
+  OTLP/JSON, as the browser SDK does. The app is a service in Oodle APM,
+  and its span is the parent of the backend's spans. The span has no query
+  string in `url.full`. A request whose traceparent the app set gets none.
+  `sendClientSpans: false` turns it off.
 - With another RUM SDK in the same app whose XHR tracking adds its trace
   headers without a check for headers that are already set, a request
   carries one `traceparent`. When that SDK traces a request, Oodle now

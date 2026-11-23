@@ -236,7 +236,32 @@ function events(eventType?: string) {
   return eventType ? list.filter((e) => e.event_type === eventType) : list;
 }
 
-async function collectorPoster(_url: string, _headers: Record<string, string>, body: Uint8Array | string) {
+/** The OTLP/JSON bodies posted to the trace path; cleared before each test. */
+const spanUploads: Array<{ url: string; headers: Record<string, string>; body: Record<string, any> }> = [];
+
+/** The client spans of this test, with their resource attributes. */
+function clientSpans(): Array<{ resource: Record<string, unknown>; span: Record<string, any> }> {
+  return spanUploads.flatMap((u) =>
+    (u.body.resourceSpans ?? []).flatMap((rs: any) => {
+      const resource = Object.fromEntries(
+        (rs.resource?.attributes ?? []).map((a: any) => [a.key, a.value.stringValue ?? a.value.intValue]),
+      );
+      return rs.scopeSpans.flatMap((ss: any) => ss.spans.map((span: any) => ({ resource, span })));
+    }),
+  );
+}
+
+function spanAttr(span: Record<string, any>, key: string): unknown {
+  const a = (span.attributes ?? []).find((x: any) => x.key === key);
+  return a ? (a.value.stringValue ?? a.value.intValue) : undefined;
+}
+
+async function collectorPoster(url: string, headers: Record<string, string>, body: Uint8Array | string) {
+  if (url.endsWith('/v1/rum/traces')) {
+    const text = typeof body === 'string' ? body : strFromU8(gunzipSync(body));
+    spanUploads.push({ url, headers: { ...headers }, body: JSON.parse(text) });
+    return { status: 200, rateLimits: null };
+  }
   const env = decode(body);
   uploads.push(env);
   history.push(env);
@@ -309,6 +334,7 @@ afterAll(async () => {
 
 beforeEach(() => {
   uploads.length = 0;
+  spanUploads.length = 0;
 });
 
 async function settle(ms = 6000) {
@@ -553,7 +579,76 @@ describe('OodleRum end to end', () => {
       expect(headers['x-datadog-trace-id']).toBe('7646066318290124331');
       const res = events('resource').find((r) => String(r.url_full).endsWith(`/api/${name}`));
       expect(res).toMatchObject({ trace_id: REF_TRACE, span_id: 'cae6ce09b5150042' });
+      // The reference SDK sends its client span to its own backend; Oodle
+      // sends one with the same ids, so the backend trace has its parent in
+      // Oodle too.
+      const span = clientSpans().find((s) => spanAttr(s.span, 'url.path') === `/api/${name}`);
+      expect(span?.span).toMatchObject({ traceId: REF_TRACE, spanId: 'cae6ce09b5150042' });
     }
+  });
+
+  it('sends a client span for each request it traces, the parent of the backend spans', async () => {
+    const xhr = new FakeXHR() as unknown as XMLHttpRequest;
+    xhr.open('POST', 'https://user:secret@api.fieldwork.test:8443/api/trpc/sync.span?token=abc#frag');
+    xhr.send();
+    const untraced = new FakeXHR() as unknown as XMLHttpRequest;
+    untraced.open('GET', 'https://cdn.other.test/no-span.json');
+    untraced.send();
+    const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    // React Native's own fetch, which runs on XHR (an earlier test showed it).
+    const pending = appFetch('https://api.fieldwork.test/api/polyfill-span');
+    await vi.advanceTimersByTimeAsync(10);
+    await pending;
+    await settle();
+
+    const spans = clientSpans();
+    expect(spans).toHaveLength(2);
+    const upload = spanUploads[0];
+    expect(upload.url).toBe('https://inst.collector.oodle.ai/v1/rum/traces');
+    expect(upload.headers).toMatchObject({ 'X-OODLE-INSTANCE': 'inst', 'X-API-KEY': 'key', 'Content-Type': 'application/json' });
+
+    const parent = (xhr as unknown as FakeXHR).headers.traceparent.split('-');
+    const { resource, span } = spans.find((s) => s.span.traceId === parent[1])!;
+    // The span's ids are the ones the backend reads from traceparent.
+    expect(span).toMatchObject({ spanId: parent[2], name: 'POST', kind: 3, status: {} });
+    expect(BigInt(span.endTimeUnixNano)).toBeGreaterThanOrEqual(BigInt(span.startTimeUnixNano));
+    // No query string, fragment or user info: beforeSend does not see spans.
+    expect(spanAttr(span, 'url.full')).toBe('https://api.fieldwork.test:8443/api/trpc/sync.span');
+    expect(spanAttr(span, 'server.address')).toBe('api.fieldwork.test');
+    expect(spanAttr(span, 'server.port')).toBe('8443');
+    expect(spanAttr(span, 'http.request.method')).toBe('POST');
+    expect(spanAttr(span, 'http.response.status_code')).toBe('200');
+    // The span names the RUM session of its resource event.
+    const res = events('resource').find((r) => r.trace_id === parent[1])!;
+    expect(spanAttr(span, 'session.id')).toBe(res.session_id);
+    expect(resource).toMatchObject({
+      'service.name': 'fieldwork-one-mobile',
+      'deployment.environment.name': 'demo',
+      'telemetry.sdk.name': '@oodle-ai/mobile-sdk-reactnative',
+      'oodle.instance_id': 'inst',
+    });
+
+    const fetched = spans.find((s) => spanAttr(s.span, 'url.path') === '/api/polyfill-span')!;
+    expect(fetched.span).toMatchObject({ name: 'GET', kind: 3 });
+    expect(fetched.span.traceId).toBe(events('resource').find((r) => String(r.url_full).endsWith('/polyfill-span'))!.trace_id);
+  });
+
+  it('sends client spans of failed requests as errors, and none for a traceparent the app set', async () => {
+    const failed = new FakeXHR() as unknown as XMLHttpRequest;
+    failed.open('GET', 'https://api.fieldwork.test/api/span-down');
+    failed.send();
+    const own = new FakeXHR() as unknown as XMLHttpRequest;
+    own.open('GET', 'https://api.fieldwork.test/api/app-traced');
+    own.setRequestHeader('traceparent', '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01');
+    own.send();
+    await settle();
+    const spans = clientSpans();
+    const down = spans.find((s) => spanAttr(s.span, 'url.path') === '/api/span-down')!;
+    expect(down.span.status).toEqual({ code: 2 });
+    expect(spanAttr(down.span, 'error.type')).toBe('NetworkError');
+    expect(spanAttr(down.span, 'http.response.status_code')).toBeUndefined();
+    // The app's own tracer sends the span of a traceparent that the app set.
+    expect(spans.find((s) => s.span.traceId === '0af7651916cd43dd8448eb211c80319c')).toBeUndefined();
   });
 
   it('traces a fetch that runs on XHR on its XHR, so it has one traceparent, with the reference SDK too', async () => {
