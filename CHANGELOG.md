@@ -43,8 +43,10 @@
   part ends. `https://api.example.com` no longer matches
   `https://api.example.com.evil.net`, so that host does not get trace
   headers.
-- On iOS the SDK directory (outbox, session, saved user) is excluded from
-  backups.
+- The SDK files (outbox, session, saved user, crash) are not in device
+  backups. On iOS their directory is excluded from backups. On Android
+  they moved to `noBackupFilesDir`; the old directory in `filesDir` is
+  deleted.
 
 ### Sending
 
@@ -74,6 +76,11 @@
 
 - iOS: when a crash signal comes again after the handler installed before
   the SDK returned, the process now ends instead of looping.
+- iOS: a stack overflow crash is recorded. The signal handler runs on an
+  alternate stack on the main thread and on the thread that installs it
+  (a thread that has one already, from KSCrash, keeps it). The stack of a
+  signal crash now comes from the crash context: it starts at the crashing
+  instruction and includes the caller of a leaf function.
 - Android: the JVM crash file is written atomically, so a crash is not
   lost when the process ends during the write.
 - `init()` no longer throws into the app. On an unexpected error it

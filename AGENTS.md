@@ -131,6 +131,14 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 - The JS handler passes a fatal error on after `FATAL_HANDOFF_DELAY_MS`.
   React Native's handler ends the process, and a crash reporter earlier
   in the chain (Datadog) writes its report on native queues.
+- The iOS signal handler runs on an alternate stack (a stack overflow
+  leaves no room on the thread stack), so it reads the crashed stack from
+  the signal context, not with backtrace(). It calls the handler installed
+  before it, and keeps an alternate stack that another reporter set.
+  `ios/OodleCrashReporter.m` can be tested on macOS: it uses Foundation
+  only.
+- SDK files are kept out of device backups: iOS excludes its directory,
+  Android uses `noBackupFilesDir` (`Storage.directory`).
 
 ## Tests
 
