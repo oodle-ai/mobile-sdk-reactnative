@@ -157,12 +157,10 @@ const server = http.createServer((req, res) => {
   });
 });
 
-// Idle connections stay open. On the CI macOS runners, opening a new
-// connection from the simulator can wait about 30 s in the system proxy
-// lookup (SCDynamicStoreCopyProxies). With Node's default of 5 s, the app
-// opened a new connection for the batch it sends on the way to the
-// background, after a quiet time on screen. That batch then arrived late,
-// or not at all before iOS suspended the app.
+// Idle connections stay open. On the CI macOS runners, a new connection
+// from the simulator can wait a long time in the system proxy lookup
+// (SCDynamicStoreCopyProxies), and Node's default of 5 s made the app
+// open one after each quiet time. Each new connection is logged.
 server.keepAliveTimeout = 10 * 60_000;
 server.headersTimeout = server.keepAliveTimeout + 1000;
 server.on('connection', (socket) => console.log(`connection from port ${socket.remotePort}`));

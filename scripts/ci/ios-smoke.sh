@@ -43,13 +43,19 @@ if ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q OodleExample; then
   echo "The app left a crash report."
   exit 1
 fi
-# On a CI simulator the batch sent on the way to the background arrives
-# up to about 30 s after the app leaves the screen (the upload window of
-# the SDK). The fixed sleep above lost that race in about half the runs,
-# so wait for the background event, up to 60 s more.
-for _ in $(seq 1 60); do
-  grep -q '"ios_app_state":"background"' "$OUT/events.ndjson" 2>/dev/null && break
-  sleep 1
-done
+# On the CI runners a backgrounded app makes no network progress for
+# about 30 s (both SDKs send nothing until then; a local simulator sends
+# within 50 ms). In some runs iOS also ends the app before that. So the
+# check does not depend on how fast a background app can send. It checks
+# what the SDK promises: the background event is not lost. When it has
+# not arrived after 45 s, the app comes back to the foreground: the live
+# process sends it, or a new process sends it from the outbox on disk.
+has_background() { grep -q '"ios_app_state":"background"' "$OUT/events.ndjson" 2>/dev/null; }
+for _ in $(seq 1 45); do has_background && break; sleep 1; done
+if ! has_background; then
+  echo "$(date -u +%T) no background event yet; the app comes back to the foreground"
+  xcrun simctl launch "$DEVICE" "$BUNDLE" > /dev/null
+  for _ in $(seq 1 60); do has_background && break; sleep 1; done
+fi
 echo "$(date -u +%T) check"
 node "$(dirname "$0")/check-collector.mjs" --out "$OUT" --platform ios
