@@ -89,7 +89,10 @@ A return to the app goes on with the view it left, with its id and start,
 and its time spent includes the time away. Only a session that ended while
 the app was away gives a new view. The update sent on the way to the
 background keeps the view open: readers take a view's vitals from its
-closing update, so closing it twice counts it twice.
+closing update, so closing it twice counts it twice. Each view is closed
+once, also when its session ended first (an idle screen, a long time
+away): the closing update goes out on the view's own session
+(`emitViewUpdate`), and is not activity.
 
 ## Replay is rrweb
 

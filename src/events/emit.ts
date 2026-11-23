@@ -107,22 +107,37 @@ export function emit(data: EventData, activity = true) {
   if (event) enqueue(EVENTS_BATCH_KEY, event);
 }
 
+/** The session a view belongs to, and whether this update closes the view. */
+export interface ViewOwner {
+  sessionId: string;
+  sampled: boolean;
+  closing: boolean;
+}
+
 /**
  * Sends one update of a view. Readers keep the highest `view_update_seq`
  * per `view_id`, and count the view from its first update. Unsent
  * updates of one view collapse into the newest, which keeps the flags
  * that count the view and the session.
+ *
+ * An update goes out on the session of its view. Once that session has
+ * ended, only the closing update goes out: readers take a view's vitals
+ * from it, and without it the view stays open. It is not activity, so it
+ * does not keep the session open or start one.
  */
-export function emitViewUpdate(data: EventData) {
+export function emitViewUpdate(data: EventData, owner: ViewOwner) {
   if (!canRecord()) return;
-  // A refresh of a view the reader left open does not start a session;
-  // a new screen started one (startView) before it gets here.
-  if (isSessionExpired()) return;
-  const session = getSession(false);
-  if (!session.sampled) return;
+  if (!owner.sampled) return;
+  const live = !isSessionExpired() && peekSession()?.id === owner.sessionId;
+  if (!live && !owner.closing) return;
   if (isServerRateLimited('events')) return;
-  if (data.view_update_seq === 1) incrementSessionCount('view');
-  const built: EventData = { log_record_uid: uuid(), ...baseContext(false), ...data };
+  if (live && data.view_update_seq === 1) incrementSessionCount('view');
+  const built: EventData = {
+    log_record_uid: uuid(),
+    ...baseContext(false),
+    ...data,
+    session_id: owner.sessionId,
+  };
   if (data.view_update_seq === 1) built.view_is_new = 1;
   const event = finishEvent(built);
   if (!event) return;

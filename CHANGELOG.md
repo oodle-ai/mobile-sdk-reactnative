@@ -15,6 +15,10 @@
 - A return to the app goes on with the view it left, with its id and
   start, as Datadog does. Only a session that ended while the app was
   away gives a new view.
+- A view open when its session ends (an idle screen, a long time away)
+  is closed in that session, with `view_is_active: 0` and its full time
+  spent, when the next activity starts a new session. Before, its closing
+  update was dropped and the view stayed open.
 - A tap is named by the component that has the press handler
   (`Pressable`, `TouchableOpacity`), not by the `View` it renders.
 
