@@ -4,7 +4,7 @@ import { getCurrentViewInfo, getPreviousScreenName } from '../events/view-state'
 import { getConfig } from './config';
 import { getFeatureFlags } from './flags';
 import { getDeviceInfo, native, storage } from './native';
-import { getSession } from './session';
+import { getSession, peekSession } from './session';
 import { getTags } from './tags';
 import { getUser, userFields } from './user';
 import { isoTime } from './clock';
@@ -146,12 +146,14 @@ const LAST_CONTEXT_KEY = 'last_context';
  * start can be attached to the session and screen it happened on.
  */
 export function saveLastContext() {
-  const session = getSession(false);
+  // Saving the context is not activity: it must not start a session. On
+  // a first launch there is none until the first activity.
+  const session = peekSession();
   const view = getCurrentViewInfo();
   const user = getUser();
   storage.setJSON(LAST_CONTEXT_KEY, {
-    session_id: session.id,
-    sampled: session.sampled,
+    session_id: session?.id ?? '',
+    sampled: session?.sampled ?? true,
     app_screen_name: view?.name ?? '',
     view_id: view?.id ?? '',
     user: user ? { ...user } : null,

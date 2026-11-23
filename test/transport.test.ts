@@ -526,6 +526,91 @@ describe('transport', () => {
   });
 
   // The collector keeps mobile SDK versions apart from browser ones.
+  it('does not queue again a body in flight when consent is withdrawn', async () => {
+    let answer: (r: PostResult) => void = () => {};
+    setPoster(() => new Promise<PostResult>((resolve) => (answer = resolve)));
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pendingCounts().inFlight).toBe(1);
+    clearAll();
+    answer({ status: 503, rateLimits: null });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(pendingCounts()).toMatchObject({ retries: 0, inFlight: 0 });
+    persistOutbox({ sync: true });
+    expect(storage.get('outbox')).toBeNull();
+  });
+
+  it('sends nothing new while a failed body backs off, and keeps the order', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    let online = false;
+    const order: number[] = [];
+    setPoster(async (_url, _headers, body) => {
+      if (!online) return { status: 0, rateLimits: null };
+      const lines = decode(body);
+      for (const item of lines.slice(1).filter(Array.isArray).flat()) order.push((item as { n: number }).n);
+      return { status: 202, rateLimits: null };
+    });
+    enqueue('events', { n: 1 });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    // Three more flushes while the first body backs off.
+    for (let n = 2; n <= 4; n++) {
+      enqueue('events', { n });
+      flush();
+      await vi.advanceTimersByTimeAsync(300);
+    }
+    expect(pendingCounts().retries).toBe(4);
+    expect(pendingCounts().inFlight).toBe(0);
+    online = true;
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(order).toEqual([1, 2, 3, 4]);
+  });
+
+  it('puts bodies that fail together back in the order they were built', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    const answers: Array<(r: PostResult) => void> = [];
+    setPoster(() => new Promise<PostResult>((resolve) => answers.push(resolve)));
+    for (let n = 1; n <= 3; n++) {
+      enqueue('events', { n });
+      flush();
+    }
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answers).toHaveLength(3);
+    // The answers come back in reverse order.
+    for (let i = answers.length - 1; i >= 0; i--) answers[i]({ status: 0, rateLimits: null });
+    await vi.advanceTimersByTimeAsync(0);
+    persistOutbox({ sync: true });
+    const box = JSON.parse(storage.get('outbox')!);
+    const ns = box.retry.map((r: { body: string }) => JSON.parse(r.body.split('\n')[2])[0].n);
+    expect(ns).toEqual([1, 2, 3]);
+  });
+
+  it('escapes a body once for all writes of the outbox', async () => {
+    status = 503;
+    enqueue('events', { text: '"'.repeat(1000) });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    persistOutbox({ sync: true });
+    const first = storage.get('outbox');
+    const stringify = vi.spyOn(JSON, 'stringify');
+    persistOutbox({ sync: true });
+    // Only the queues and the id are serialized again, not the body.
+    const bodies = stringify.mock.calls.filter(([v]) => typeof v === 'string' && v.length > 500);
+    expect(bodies).toHaveLength(0);
+    stringify.mockRestore();
+    expect(storage.get('outbox')).toBe(first);
+  });
+
+  it('reads a damaged outbox without throwing', () => {
+    storage.set('outbox', JSON.stringify({ retry: [null, 5, { body: 'x' }], held: 'nope' }));
+    expect(() => restoreOutbox()).not.toThrow();
+    expect(pendingCounts().retries + pendingCounts().inFlight).toBe(1);
+    storage.set('outbox', JSON.stringify({ retry: 'nope' }));
+    restart();
+    expect(() => restoreOutbox()).not.toThrow();
+  });
+
   it('names the SDK in the envelope header', () => {
     const header = JSON.parse(buildEnvelope([{ type: 'events', items: [{ session_id: 's' }] }]).split('\n')[0]);
     expect(header).toEqual({ session_id: 's', sdk_name: 'react-native', sdk_version: expect.any(String) });

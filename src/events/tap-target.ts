@@ -5,6 +5,8 @@
  * exception.
  */
 
+import { PRIVACY_NATIVE_ID_PREFIX, type PrivacyLevel } from '../core/privacy';
+
 export interface FiberLike {
   tag?: number;
   type?: unknown;
@@ -24,16 +26,28 @@ export interface TapTarget {
   label: string;
   /** Component path above the target, outermost first. */
   path: string;
+  /**
+   * True when the target is inside a hidden or masked OodlePrivacy view.
+   * The label is then empty, and the tap position must not be sent.
+   */
+  private: boolean;
 }
 
 export interface ResolveOptions {
   actionNameAttribute: string;
   useAccessibilityLabel: boolean;
+  /**
+   * The replay masks all text (`mask-all`). A label then comes only from
+   * the action name attribute, as replay shows no text either.
+   */
+  maskText?: boolean;
 }
 
 const MAX_DEPTH = 40;
 const MAX_TEXT_NODES = 40;
 const MAX_LABEL_CHARS = 100;
+/** An OodlePrivacy wrapper can be far above the button (a whole screen). */
+const MAX_PRIVACY_DEPTH = 500;
 const HANDLER_PROPS = ['onPress', 'onLongPress', 'onValueChange', 'onPressIn'];
 const BUTTON_ROLES = new Set([
   'button',
@@ -128,6 +142,22 @@ function handlerOwner(from: FiberLike): FiberLike {
   return from;
 }
 
+/**
+ * The level of the nearest OodlePrivacy view above a fiber, or null.
+ * The nearest one wins, as in the native walkers.
+ */
+export function privacyLevelOf(start: FiberLike | null | undefined): PrivacyLevel | null {
+  let f = start;
+  for (let i = 0; f && i < MAX_PRIVACY_DEPTH; i++, f = f.return) {
+    const id = props(f).nativeID;
+    if (typeof id === 'string' && id.startsWith(PRIVACY_NATIVE_ID_PREFIX)) {
+      const level = id.slice(PRIVACY_NATIVE_ID_PREFIX.length);
+      if (level === 'hidden' || level === 'mask' || level === 'allow') return level;
+    }
+  }
+  return null;
+}
+
 function stringProp(p: Record<string, unknown>, key: string): string {
   const v = p[key];
   return typeof v === 'string' && v.trim() ? v.trim() : '';
@@ -198,21 +228,29 @@ export function resolveTapTarget(
   if (!component || GENERIC_HOSTS.has(component)) {
     component = pressable ? component || 'Touchable' : 'View';
   }
+  // A tap on something that does not respond to taps is not an action.
+  if (!pressable && !explicitName) return null;
+  const level = privacyLevelOf(target);
+  const isPrivate = level === 'hidden' || level === 'mask';
+  // Text the replay masks is not sent in the action name either. The
+  // action name attribute is set by the app developer, so it is kept.
+  const masked = isPrivate || (opts.maskText === true && level !== 'allow');
   const tp = props(target);
   const label = clipLabel(
     explicitName ||
-      a11yLabel ||
-      stringProp(tp, 'title') ||
-      stringProp(tp, 'label') ||
-      collectText(target),
+      (masked
+        ? ''
+        : a11yLabel ||
+          stringProp(tp, 'title') ||
+          stringProp(tp, 'label') ||
+          collectText(target)),
   );
-  // A tap on something that does not respond to taps is not an action.
-  if (!pressable && !explicitName) return null;
   return {
     name: explicitName ? explicitName : label ? `${component} ("${label}")` : component,
     component,
     label,
     path: names.slice().reverse().join(' > '),
+    private: isPrivate,
   };
 }
 

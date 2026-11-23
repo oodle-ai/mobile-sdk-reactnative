@@ -35,7 +35,11 @@ export interface SessionReplayConfig {
    * all features, so the default records only a sample of sessions.
    */
   sampleRate?: number;
-  /** Default `'mask-all-inputs'`. */
+  /**
+   * Default `'mask-all'`, as other mobile RUM SDKs: no text of the app is
+   * recorded unless the app allows it (`OodlePrivacy level="allow"`, or a
+   * lower level here). It also keeps text out of tap action names.
+   */
   textAndInputPrivacy?: TextAndInputPrivacy;
   /** Images are recorded as placeholders. Default `'mask-all'`. */
   imagePrivacy?: ImagePrivacy;
@@ -188,7 +192,11 @@ export function toUrlTest(match: UrlMatcher): (url: string) => boolean {
   // A full URL prefix ("https://api.example.com/v1") matches by prefix;
   // a bare host matches the host and its subdomains.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(match)) {
-    return (url) => url.startsWith(match);
+    // The prefix must end where a host or path part ends: otherwise
+    // "https://api.example.com" also matched "https://api.example.com.evil.net",
+    // and that host got the trace headers.
+    if (/[/?#=&]$/.test(match)) return (url) => url.startsWith(match);
+    return (url) => url.startsWith(match) && /^(?:$|[/?#:])/.test(url.slice(match.length));
   }
   return (url) => {
     const host = urlHost(url);
@@ -296,9 +304,11 @@ export function resolveConfig(
     traceSampleRate: rate(input.traceSampleRate, 100),
     nativeCrashReporting: input.nativeCrashReporting !== false,
     trackAnrs: input.trackAnrs !== false,
+    // Native code turns the threshold into an integer, which traps on
+    // Infinity on iOS.
     anrThresholdMs:
-      typeof input.anrThresholdMs === 'number' && input.anrThresholdMs > 0
-        ? input.anrThresholdMs
+      typeof input.anrThresholdMs === 'number' && Number.isFinite(input.anrThresholdMs) && input.anrThresholdMs > 0
+        ? Math.min(input.anrThresholdMs, 60_000)
         : platformOS === 'ios'
           ? 2000
           : 5000,
@@ -315,9 +325,9 @@ export function resolveConfig(
       sampleRate: rate(replayObj.sampleRate, DEFAULT_REPLAY_SAMPLE_RATE),
       textAndInputPrivacy:
         replayObj.textAndInputPrivacy === 'mask-sensitive-inputs' ||
-        replayObj.textAndInputPrivacy === 'mask-all'
+        replayObj.textAndInputPrivacy === 'mask-all-inputs'
           ? replayObj.textAndInputPrivacy
-          : 'mask-all-inputs',
+          : 'mask-all',
       imagePrivacy: 'mask-all',
       touchPrivacy: replayObj.touchPrivacy === 'hide' ? 'hide' : 'show',
       startRecordingImmediately: replayObj.startRecordingImmediately !== false,

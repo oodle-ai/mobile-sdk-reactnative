@@ -44,9 +44,10 @@ describe('collectors', () => {
   // A collector of a session that is not sampled only costs battery: its
   // events are not sent.
   it('stop when the session is not sampled', () => {
-    // init() rolls the session, at a sample rate of 0.
-    expect(session.peekSession()?.sampled).toBe(false);
+    // init() starts no session; the first screen does, at a sample rate of 0.
+    expect(session.peekSession()).toBeNull();
     sdk.OodleRum.startView('home', 'Home');
+    expect(session.peekSession()?.sampled).toBe(false);
     expect(running).toEqual({ watchdog: false, vitals: false });
     expect(longtasks.isLongTaskTracking()).toBe(false);
   });

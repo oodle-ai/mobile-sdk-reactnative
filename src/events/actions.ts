@@ -2,6 +2,7 @@ import { getConfig } from '../core/config';
 import { uuid } from '../core/ids';
 import { getDeviceInfo } from '../core/native';
 import { incrTelemetry } from '../core/telemetry';
+import { isOverPrivateArea } from '../replay/recorder';
 import { attributesJSON, emit } from './emit';
 import { fiberFromEvent, resolveTapTarget } from './tap-target';
 import { getCurrentViewInfo } from './view-state';
@@ -62,22 +63,28 @@ export function recordTap(startEvent: unknown, start: TouchPoint, end: TouchPoin
     target = resolveTapTarget(fiber, {
       actionNameAttribute: config.actionNameAttribute,
       useAccessibilityLabel: config.useAccessibilityLabel,
+      maskText: config.replay.textAndInputPrivacy === 'mask-all',
     });
   } catch {
     target = null;
   }
   if (!target) return;
   const d = getDeviceInfo();
-  const base = {
+  const base: Record<string, unknown> = {
     event_type: 'action',
     app_widget_name: target.name,
     app_widget_id: target.path,
     action_text: target.label,
-    app_screen_coordinate_x: Math.round(end.x),
-    app_screen_coordinate_y: Math.round(end.y),
     viewport_width: Math.round(d.screenWidth),
     viewport_height: Math.round(d.screenHeight),
   };
+  // The replay touch privacy applies to the tap position too.
+  const hidePosition =
+    target.private || config.replay.touchPrivacy === 'hide' || isOverPrivateArea(end.x, end.y);
+  if (!hidePosition) {
+    base.app_screen_coordinate_x = Math.round(end.x);
+    base.app_screen_coordinate_y = Math.round(end.y);
+  }
   emit({ ...base, action_id: uuid(), action_name: target.name, action_type: 'tap', is_frustration: 0 });
   const view = getCurrentViewInfo();
   if (trackRage(`${view?.id ?? ''}:${target.name}`, end.t)) {

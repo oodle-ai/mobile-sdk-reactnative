@@ -1,6 +1,7 @@
 import { AppState, Platform, type AppStateStatus, type NativeEventSubscription } from 'react-native';
 import { refreshConnectivity, saveLastContext } from '../core/context';
 import { flushSession, isSessionExpired } from '../core/session';
+import { logger } from '../core/logger';
 import { flush, persistOutbox } from '../core/transport';
 import { canRecord, emit } from './emit';
 import { drainNativeEvents } from './errors';
@@ -54,8 +55,12 @@ function toBackground() {
   saveLastContext();
   flushSession();
   flush();
-  // The OS can end a background app without warning.
-  persistOutbox();
+  // The OS can end a background app without warning, and a backgrounded
+  // app can get so little CPU that a write queued on a native background
+  // queue does not run before that: the events of this moment, sent just
+  // now and not answered yet, were then lost. The write is done now, while
+  // the JS thread runs; the app draws no frames in the background.
+  persistOutbox({ sync: true });
 }
 
 function toForeground() {
@@ -74,6 +79,7 @@ function toForeground() {
 }
 
 function onChange(state: AppStateStatus) {
+  logger.debug('app state', state);
   if (!canRecord()) return;
   // iOS reports 'inactive' for the app switcher and system sheets; the
   // app is still on screen, so only 'background' counts as leaving.

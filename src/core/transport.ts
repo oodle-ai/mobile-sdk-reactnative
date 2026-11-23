@@ -68,6 +68,13 @@ interface RetryItem {
   carriesReplay: boolean;
   /** Earliest time to send again, after a failure. */
   notBefore: number;
+  /** Order of build in this process, for bodies built in the same ms. Not stored. */
+  seq: number;
+}
+
+/** Oldest first: by build time, then by build order. */
+function olderFirst(a: RetryItem, b: RetryItem): number {
+  return a.createdAt - b.createdAt || a.seq - b.seq;
 }
 
 export interface PostResult {
@@ -95,6 +102,18 @@ let outboxOnDisk = false;
 let outboxHasHeld = false;
 /** Bodies sent and not yet answered. The outbox keeps them, see persistOutbox. */
 const inFlight = new Set<RetryItem>();
+/**
+ * Goes up when consent is withdrawn (clearAll). The answer to a body sent
+ * before that is ignored: a failed body must not go back in the queue.
+ */
+let generation = 0;
+/**
+ * The JSON string of each body, by body id. A body is up to 500 KB, and
+ * the outbox is written after each change of the retry queue; escaping
+ * every body again on each write cost the JS thread most while offline.
+ */
+const bodyJson = new Map<string, string>();
+let nextSeq = 0;
 let canSend: () => boolean = () => true;
 let replayDropHandler: (() => void) | null = null;
 let authWarned = false;
@@ -307,9 +326,7 @@ export function flush() {
   if (sections.length === 0) return;
   const body = buildEnvelope(sections);
   const carriesReplay = sections.some((s) => s.type === REPLAY_BATCH_KEY);
-  // sendBody puts the body in flight (or in the retry queue) before it
-  // waits for the answer.
-  void sendBody({
+  const item: RetryItem = {
     id: uuid(),
     createdAt: Date.now(),
     body,
@@ -317,7 +334,19 @@ export function flush() {
     failures: 0,
     carriesReplay,
     notBefore: 0,
-  });
+    seq: nextSeq++,
+  };
+  if (retryQueue.length > 0) {
+    // Older bodies wait, maybe for the backoff after a failure (offline).
+    // The new body goes after them: sent now, it would fail too while
+    // offline, and replay segments must arrive in the order recorded.
+    addRetry(item);
+    drainRetries();
+  } else {
+    // sendBody puts the body in flight (or in the retry queue) before it
+    // waits for the answer.
+    void sendBody(item);
+  }
   // The outbox holds the items of this body as queued items. If the app
   // ends before the outbox is written again, the next start sends them in
   // a body with a new id, which the collector cannot tell from a new
@@ -413,9 +442,17 @@ async function sendBody(item: RetryItem): Promise<void> {
     return;
   }
   inFlight.add(item);
+  const gen = generation;
   try {
     const sentAt = Date.now();
+    logger.debug('send', item.id.slice(0, 8), item.body.length);
     const res = await post(`${config.endpoint}${INGEST_PATH}`, headers(item), item.body);
+    logger.debug('answer', item.id.slice(0, 8), res.status, Date.now() - sentAt);
+    if (gen !== generation) {
+      // Consent was withdrawn while the body was sent.
+      inFlight.delete(item);
+      return;
+    }
     if (res.status > 0) observeServerDate(res.date, sentAt, Date.now());
     parseRateLimits(res.rateLimits);
     if (res.status === 429 || res.status >= 500) {
@@ -440,12 +477,14 @@ async function sendBody(item: RetryItem): Promise<void> {
       inFlight.delete(item);
       syncOutboxAfterSend();
     }
-  } catch {
+  } catch (e) {
+    logger.debug('send failed', item.id.slice(0, 8), e);
     inFlight.delete(item);
+    if (gen !== generation) return;
     incrTelemetry('send_failures');
     addRetry(item, 'unreachable');
   } finally {
-    drainRetries();
+    if (gen === generation) drainRetries();
   }
 }
 
@@ -475,6 +514,21 @@ function removeOutbox() {
   storage.remove(OUTBOX_KEY);
   outboxOnDisk = false;
   outboxHasHeld = false;
+  bodyJson.clear();
+}
+
+/** The JSON of a retry item in the outbox. The escaped body is kept (bodyJson). */
+function retryItemJson(r: RetryItem): string {
+  let body = bodyJson.get(r.id);
+  if (body === undefined) {
+    body = JSON.stringify(r.body);
+    bodyJson.set(r.id, body);
+  }
+  return (
+    `{"id":${JSON.stringify(r.id)},"createdAt":${r.createdAt},"body":${body},` +
+    `"attempts":${r.attempts},"failures":${r.failures},` +
+    `"carriesReplay":${r.carriesReplay},"notBefore":0}`
+  );
 }
 
 /**
@@ -504,6 +558,7 @@ function addRetry(item: RetryItem, failure?: 'answer' | 'unreachable') {
   const attempts = failure === 'answer' ? item.attempts + 1 : item.attempts;
   const failures = failure ? item.failures + 1 : item.failures;
   if (attempts > MAX_RETRY_ATTEMPTS || expired(item)) {
+    bodyJson.delete(item.id);
     incrTelemetry('retry_drops');
     onDropped(item.carriesReplay);
     return;
@@ -514,16 +569,20 @@ function addRetry(item: RetryItem, failure?: 'answer' | 'unreachable') {
     failures,
     notBefore: failure ? Date.now() + retryDelayMs(failures) : 0,
   };
+  // Over the limit, the oldest bodies are dropped, as other mobile RUM SDKs do.
   while (retryBytes + next.body.length > MAX_RETRY_BYTES && retryQueue.length > 0) {
     const old = retryQueue.shift()!;
     retryBytes -= old.body.length;
+    bodyJson.delete(old.id);
     incrTelemetry('retry_drops');
     onDropped(old.carriesReplay);
   }
-  // A failed body goes back to the front: replay segments must reach
-  // the server in the order they were recorded.
-  if (failure) retryQueue.unshift(next);
-  else retryQueue.push(next);
+  // The queue is kept oldest first: replay segments must reach the server
+  // in the order they were recorded. Several bodies in flight can fail in
+  // any order, so a failed body goes back in its place by age.
+  let at = retryQueue.length;
+  while (at > 0 && olderFirst(retryQueue[at - 1], next) > 0) at--;
+  retryQueue.splice(at, 0, next);
   retryBytes += next.body.length;
   schedulePersist();
 }
@@ -601,32 +660,39 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
   }
   const held: Record<string, Payload[]> = {};
   for (const [key, q] of queues) if (q.items.length > 0) held[key] = q.items.slice();
-  const retry = [...inFlight, ...retryQueue].map((r) => ({ ...r, notBefore: 0 }));
+  // Oldest first, so the trim below drops the oldest.
+  const retry = [...inFlight, ...retryQueue].sort(olderFirst);
   if (retry.length === 0 && Object.keys(held).length === 0) {
     removeOutbox();
     return;
   }
-  // Each item is serialized once, and the oldest are dropped by their
-  // serialized length. JSON escapes the quotes and line breaks of a body,
-  // so the raw body length was short by about 10%, and the whole queue
-  // was serialized again once per dropped body.
-  const parts = retry.map((r) => JSON.stringify(r));
+  // The oldest bodies are dropped by their serialized length. JSON
+  // escapes the quotes and line breaks of a body, so the raw body length
+  // is short by about 10%. Bodies are taken from the newest, and the ones
+  // past the limit are not serialized at all.
   const heldJson = JSON.stringify(held);
   // The text is '{"retry":[' + parts joined by ',' + '],"held":' + heldJson + '}'.
   let length = '{"retry":[],"held":}'.length + heldJson.length;
-  for (const part of parts) length += part.length;
-  if (parts.length > 1) length += parts.length - 1;
-  let first = 0;
-  while (first < parts.length && length > MAX_OUTBOX_CHARS) {
-    length -= parts[first].length + (parts.length - first > 1 ? 1 : 0);
-    first++;
-    incrTelemetry('outbox_drops');
-  }
   if (length > MAX_OUTBOX_CHARS) {
     incrTelemetry('outbox_drops');
     return;
   }
-  const raw = `{"retry":[${parts.slice(first).join(',')}],"held":${heldJson}}`;
+  const parts: string[] = [];
+  const kept = new Set<string>();
+  for (let i = retry.length - 1; i >= 0; i--) {
+    const part = retryItemJson(retry[i]);
+    const add = part.length + (parts.length > 0 ? 1 : 0);
+    if (length + add > MAX_OUTBOX_CHARS) {
+      incrTelemetry('outbox_drops', i + 1);
+      break;
+    }
+    length += add;
+    parts.push(part);
+    kept.add(retry[i].id);
+  }
+  parts.reverse();
+  for (const id of bodyJson.keys()) if (!kept.has(id)) bodyJson.delete(id);
+  const raw = `{"retry":[${parts.join(',')}],"held":${heldJson}}`;
   if (opts.sync) storage.set(OUTBOX_KEY, raw);
   else storage.setAsync(OUTBOX_KEY, raw);
   outboxOnDisk = true;
@@ -662,11 +728,12 @@ function scheduleRetryDrain() {
 
 /** Adds the outbox of the last run to the queues. False when there is none. */
 function loadOutbox(): boolean {
-  const box = storage.getJSON<Outbox | null>(OUTBOX_KEY, null);
-  if (!box) return false;
+  const box = storage.getJSON<Partial<Outbox> | null>(OUTBOX_KEY, null);
+  // The file can be from another SDK version, or damaged.
+  if (!box || typeof box !== 'object') return false;
   const now = Date.now();
-  for (const r of box.retry ?? []) {
-    if (typeof r.body !== 'string') continue;
+  for (const r of Array.isArray(box.retry) ? box.retry : []) {
+    if (!r || typeof r !== 'object' || typeof r.body !== 'string') continue;
     const item: RetryItem = {
       // An outbox of SDK 0.1.3 has no id or time.
       id: typeof r.id === 'string' && r.id ? r.id : uuid(),
@@ -676,6 +743,7 @@ function loadOutbox(): boolean {
       failures: 0,
       carriesReplay: !!r.carriesReplay,
       notBefore: 0,
+      seq: nextSeq++,
     };
     if (expired(item)) {
       incrTelemetry('retry_drops');
@@ -684,7 +752,10 @@ function loadOutbox(): boolean {
     retryQueue.push(item);
     retryBytes += r.body.length;
   }
-  for (const [key, items] of Object.entries(box.held ?? {})) {
+  // The outbox can be read after this run queued bodies of its own.
+  retryQueue.sort(olderFirst);
+  const held = box.held && typeof box.held === 'object' ? box.held : {};
+  for (const [key, items] of Object.entries(held)) {
     if (!Array.isArray(items)) continue;
     const q = getQueue(key);
     for (const item of items) {
@@ -731,6 +802,12 @@ export function clearAll() {
   }
   retryQueue = [];
   retryBytes = 0;
+  // Bodies in flight are forgotten; their answers are ignored (sendBody).
+  inFlight.clear();
+  bodyJson.clear();
+  generation++;
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
   // The outbox of the last run is deleted unread.
   restorePending = false;
   removeOutbox();
@@ -753,6 +830,8 @@ export function resetTransport() {
   sendsHeld = false;
   restorePending = false;
   inFlight.clear();
+  bodyJson.clear();
+  generation = 0;
   canSend = () => true;
   replayDropHandler = null;
   authWarned = false;

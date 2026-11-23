@@ -1,6 +1,7 @@
 import { View, type ViewProps } from 'react-native';
+import { PRIVACY_NATIVE_ID_PREFIX, type PrivacyLevel } from '../core/privacy';
 
-export type PrivacyLevel = 'hidden' | 'mask' | 'allow';
+export { PRIVACY_NATIVE_ID_PREFIX, type PrivacyLevel };
 
 export interface OodlePrivacyProps extends ViewProps {
   /**
@@ -11,9 +12,6 @@ export interface OodlePrivacyProps extends ViewProps {
    */
   level: PrivacyLevel;
 }
-
-/** The native view tree walker reads this marker from the view's nativeID. */
-export const PRIVACY_NATIVE_ID_PREFIX = 'oodle-privacy-';
 
 /** Sets the replay privacy of everything inside it. */
 export function OodlePrivacy({ level, children, ...rest }: OodlePrivacyProps) {

@@ -124,7 +124,21 @@ function syncCollectors() {
   else stopLongTaskTracking();
 }
 
+/**
+ * init() runs in the app's start code, often during the first render. An
+ * exception there would end the app, so the SDK turns itself off instead.
+ */
 function init(input: OodleRumConfig): boolean {
+  try {
+    return initUnchecked(input);
+  } catch (e) {
+    logger.error('init() failed; the SDK is off', e);
+    setConfig(null);
+    return false;
+  }
+}
+
+function initUnchecked(input: OodleRumConfig): boolean {
   if (initialized) {
     logger.warn('init() was already called; this call is ignored');
     return true;
