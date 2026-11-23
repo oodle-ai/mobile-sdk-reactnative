@@ -57,6 +57,33 @@ keeps these rules (`src/core/transport.ts`):
   (`holdSends`): the crash is on disk, and a send just before the process
   ends would be sent again by the next start.
 - A crash (`error_is_crash: 1`) is never rate limited.
+- The outbox of the last run is read after the first frame
+  (`deferRestoreOutbox`). A write before that reads it first, so the file
+  is never replaced unread. A crash queued at start is written at once.
+- On iOS native code compresses and posts each body (`postGzip`), off the
+  JS thread. Android compresses a string body itself. The envelope header
+  has `sdk_name: "react-native"` and `sdk_version`.
+
+## Only user activity starts a session
+
+A session ends after 15 minutes without user activity (`SESSION_TIMEOUT_MS`).
+Activity is a tap or other action, a new screen (`startView`), a return to
+the app, or a JS error. Background work (view refreshes, replay, requests
+the app makes by itself, long tasks, console lines, native ANR and hang
+records) passes `activity: false`: it does not keep a session open, and
+once the session has ended its events are dropped (`isSessionExpired`).
+`getSession(false)` never starts a session. When it did, an app left open
+on one screen started a new session every 15 minutes, which Datadog does
+not.
+
+As in Datadog's SDKs, each launch starts a session of its own at its first
+activity, linked to the last one (`session_previous_id`); the crash that
+ended the last run is still reported on its session (`reportPendingCrash`).
+A return to the app goes on with the view it left, with its id and start,
+and its time spent includes the time away. Only a session that ended while
+the app was away gives a new view. The update sent on the way to the
+background keeps the view open: readers take a view's vitals from its
+closing update, so closing it twice counts it twice.
 
 ## Replay is rrweb
 
@@ -66,6 +93,15 @@ applied in TypeScript, from the native privacy flags (`pv`, `sen`).
 `test/rrweb.test.ts` replays the events with rrweb's own `Replayer` and
 compares the result with a fresh full snapshot; keep it passing when the
 diff changes. rrweb-snapshot is pinned to the version the frontend uses.
+
+- rrweb builds an added node without its `childNodes`: a mutation adds
+  each child (text, picture) on its own.
+- The picture of a drawing is a child element, so a move does not send it
+  again. One event carries at most `PICTURE_BUDGET_CHARS` of new pictures.
+- A `truncated` snapshot is partial: views after its last shared view are
+  kept, not removed.
+- Native walks run in slices of a few ms on the main thread, with a total
+  budget; the result is serialized off the main thread.
 
 ## Native code
 

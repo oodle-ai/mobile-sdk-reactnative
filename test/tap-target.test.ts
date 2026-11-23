@@ -41,6 +41,23 @@ describe('resolveTapTarget', () => {
     expect(t.path).toContain('Header');
   });
 
+  // RN 0.88: Pressable renders the JS View with its role, and that View
+  // is found first. The name is the component with the handler.
+  it('names a Pressable by itself, not the View it renders', () => {
+    const textLeaf: FiberLike = { tag: 6, memoizedProps: 'Customers & sites' };
+    const nodes = chain(
+      { type: function Row() {}, memoizedProps: { onPress: noop } },
+      ...pressable({ onPress: noop }),
+      { type: function View() {}, memoizedProps: { accessibilityRole: 'button', accessible: true } },
+      { type: 'RCTView', memoizedProps: {} },
+      { type: 'RCTText', memoizedProps: { children: 'Customers & sites' } },
+      textLeaf,
+    );
+    const t = resolveTapTarget(nodes[nodes.length - 2], opts)!;
+    expect(t.name).toBe('Pressable ("Customers & sites")');
+    expect(t.component).toBe('Pressable');
+  });
+
   it('uses the text inside the button when there is no label', () => {
     const textHost: FiberLike = { type: 'RCTText', memoizedProps: { children: 'Save' } };
     const textLeaf: FiberLike = { tag: 6, memoizedProps: 'Save draft' };

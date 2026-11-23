@@ -78,6 +78,7 @@ class FakeXHR {
   readyState = 0;
   headers: Record<string, string> = {};
   private listeners: Array<() => void> = [];
+  private abortListeners: Array<() => void> = [];
   onreadystatechange: unknown = null;
   open(_m: string, _u: string) {}
   setRequestHeader(k: string, v: string) {
@@ -85,6 +86,14 @@ class FakeXHR {
   }
   addEventListener(ev: string, fn: () => void) {
     if (ev === 'loadend') this.listeners.push(fn);
+    if (ev === 'abort') this.abortListeners.push(fn);
+  }
+  /** As React Native's XHR: abort, then loadend, with status 0. */
+  abort() {
+    this.readyState = 4;
+    for (const fn of this.abortListeners) fn();
+    for (const fn of this.listeners) fn();
+    this.listeners = [];
   }
   getResponseHeader(name: string) {
     return name === 'content-length' ? '68' : null;
@@ -107,6 +116,9 @@ const fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
 const fakeFetch = vi.fn((input: unknown, init?: { headers?: Record<string, string> }) => {
   const url = String(input);
   fetchCalls.push({ url, headers: { ...(init?.headers ?? {}) } });
+  if (url.includes('cancelled')) {
+    return Promise.reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
+  }
   if (url.includes('polyfill')) {
     const xhr = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
     xhr.open('GET', url);
@@ -394,6 +406,23 @@ describe('OodleRum end to end', () => {
     expect(resources.filter((r) => String(r.url_full).includes('polyfill'))).toHaveLength(1);
   });
 
+  // An app cancels requests on purpose (a screen closes, a search
+  // changes). That is not a network failure.
+  it('records cancelled requests without a network error', async () => {
+    const xhr = new FakeXHR() as unknown as XMLHttpRequest;
+    xhr.open('GET', 'https://cdn.other.test/aborted-xhr.json');
+    xhr.send();
+    (xhr as unknown as FakeXHR).abort();
+    const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    await expect(appFetch('https://cdn.other.test/cancelled-fetch.json')).rejects.toMatchObject({ name: 'AbortError' });
+    await settle();
+    const urls = events('resource').map((r) => String(r.url_full));
+    expect(urls).toContain('https://cdn.other.test/aborted-xhr.json');
+    expect(urls).toContain('https://cdn.other.test/cancelled-fetch.json');
+    const failed = events('error').filter((e) => e.error_source === 'network').map((e) => String(e.url_full));
+    expect(failed.filter((u) => u.includes('aborted') || u.includes('cancelled'))).toEqual([]);
+  });
+
   // Another tracing SDK (or the app) set the header first: it is kept,
   // and the resource gets that trace.
   it('keeps a traceparent that is already set and records its trace', async () => {
@@ -464,17 +493,99 @@ describe('OodleRum end to end', () => {
     expect(events('action').find((a) => a.action_name === 'after replay')!.replay_id).toBe(sdk.OodleRum.getSessionId());
   });
 
-  it('pairs background and foreground, ends the view and saves the outbox', async () => {
+  // A list can still move after a drag; a capture then costs frames. One
+  // capture after it shows where a fling stopped.
+  it('captures twice after a tap, and once after a drag', async () => {
+    await settle(2000);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchMove(100, 260);
+    recorder.recordTouchEnd(100, 320, false);
+    await vi.advanceTimersByTimeAsync(590);
+    // No capture at 120 ms: at most the capture loop's own.
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeLessThanOrEqual(1);
+    fakeNative.captureWireframes.mockClear();
+    await vi.advanceTimersByTimeAsync(20);
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeGreaterThanOrEqual(1);
+    await vi.advanceTimersByTimeAsync(100);
+    fakeNative.captureWireframes.mockClear();
+    recorder.recordTouchStart(100, 200);
+    recorder.recordTouchEnd(102, 201, true);
+    await vi.advanceTimersByTimeAsync(700);
+    expect(fakeNative.captureWireframes.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  // A touch on a custom PIN pad shows which digit was typed.
+  it('records no touches over hidden or masked views', async () => {
+    const before = screen;
+    screen = {
+      ...screen,
+      nodes: [...screen.nodes, { id: 50, k: 'h', x: 0, y: 500, w: 412, h: 200 }],
+      masks: [[0, 750, 412, 100]],
+    } as typeof screen;
+    recorder.onViewChanged();
+    await settle(2000);
+    uploads.length = 0;
+    for (const [x, y] of [
+      [50, 600],
+      [60, 800],
+      [70, 100],
+    ]) {
+      recorder.recordTouchStart(x, y);
+      recorder.recordTouchEnd(x, y, true);
+    }
+    await settle(7000);
+    const touches = all('replay')
+      .flatMap((seg) => seg.events as Array<{ type: number; data: Record<string, unknown> }>)
+      .filter((e) => e.type === 3 && e.data.source === 2);
+    expect(touches.length).toBeGreaterThan(0);
+    expect(new Set(touches.map((e) => e.data.x))).toEqual(new Set([70]));
+    screen = before;
+    recorder.onViewChanged();
+    await settle(2000);
+  });
+
+  it('pairs background and foreground, and goes on with the same view', async () => {
     rnStub.emitAppState('background');
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background']);
-    await vi.advanceTimersByTimeAsync(10);
+    // The update sent on the way out keeps the view open: a view closed
+    // here and again later would count twice in the vitals.
+    const out = events('view').filter((v) => v.app_screen_name === 'Notifications').at(-1)!;
+    expect(out.view_is_active).toBe(1);
+    await vi.advanceTimersByTimeAsync(60_000);
     rnStub.emitAppState('active');
     await settle();
     expect(events('visibility').map((e) => e.android_app_state)).toEqual(['background', 'foreground']);
     expect(events('error').find((e) => e.error_source === 'anr')).toMatchObject({ exception_type: 'ANR' });
-    // The view restarts as a new instance after the app returns.
+    // One view with its start, as Datadog counts it: its time spent
+    // includes the minute away.
     const notif = events('view').filter((v) => v.app_screen_name === 'Notifications');
-    expect(new Set(notif.map((v) => v.view_id)).size).toBeGreaterThanOrEqual(2);
+    expect(new Set(notif.map((v) => v.view_id)).size).toBe(1);
+    const last = notif.at(-1)!;
+    expect(last.view_is_active).toBe(1);
+    expect(last.view_start).toBe(out.view_start);
+    expect(last.view_update_seq as number).toBeGreaterThan(out.view_update_seq as number);
+    expect(last.view_time_spent_ms as number).toBeGreaterThanOrEqual((out.view_time_spent_ms as number) + 60_000);
+  });
+
+  // Away longer than the session timeout: the session ended, so the
+  // return starts a new one, with a new view of the same screen.
+  it('starts a new session and view after a long time in the background', async () => {
+    sdk.OodleRum.startView('away-key', 'Away');
+    await settle();
+    const before = sdk.OodleRum.getSessionId();
+    const viewBefore = events('view').filter((v) => v.app_screen_name === 'Away').at(-1)!.view_id;
+    rnStub.emitAppState('background');
+    await vi.advanceTimersByTimeAsync(16 * 60_000);
+    uploads.length = 0;
+    rnStub.emitAppState('active');
+    await settle();
+    const after = sdk.OodleRum.getSessionId();
+    expect(after).not.toBe(before);
+    const away = events('view').filter((v) => v.app_screen_name === 'Away' && v.session_id === after);
+    expect(away.length).toBeGreaterThan(0);
+    expect(away[0].view_id).not.toBe(viewBefore);
+    expect(all('events').find((e) => e.session_id === after && e.session_is_new === 1)?.session_previous_id).toBe(before);
   });
 
   it('writes the outbox on a background thread', async () => {
@@ -483,6 +594,38 @@ describe('OodleRum end to end', () => {
     transport.persistOutbox();
     expect(fakeNative.storageSetAsync.mock.calls.map((c) => c[0])).toEqual(['outbox']);
     await settle();
+  });
+
+  // An app left open on one screen: the view refresh, replay and the
+  // app's own requests run on, and Datadog starts no new session.
+  it('starts no session while the app sits idle, and one at the next tap', async () => {
+    sdk.OodleRum.startView('idle-key', 'Idle');
+    await settle();
+    const before = sdk.OodleRum.getSessionId();
+    expect(before).not.toBe('');
+    uploads.length = 0;
+    // Sixteen idle minutes: view refreshes every 30 s, a request the app
+    // makes by itself, replay captures.
+    for (let m = 0; m < 16; m++) await vi.advanceTimersByTimeAsync(60_000);
+    const poll = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
+    poll.open('GET', 'https://api.example.com/poll');
+    poll.send();
+    await settle();
+    const ids = new Set(all('events').map((e) => e.session_id));
+    expect([...ids].filter((id) => id !== before)).toEqual([]);
+    expect(sdk.OodleRum.getSessionId()).toBe('');
+    // A tap is activity: a new session, linked to the old one, with the
+    // screen the reader is on.
+    uploads.length = 0;
+    sdk.OodleRum.addAction('tap after idle');
+    await settle();
+    const after = sdk.OodleRum.getSessionId();
+    expect(after).not.toBe('');
+    expect(after).not.toBe(before);
+    const first = all('events').filter((e) => e.session_id === after && e.session_is_new === 1);
+    expect(first).toHaveLength(1);
+    expect(first[0].session_previous_id).toBe(before);
+    expect(events('view').some((v) => v.session_id === after && v.app_screen_name === 'Idle')).toBe(true);
   });
 
   it('starts a new session after stopSession', async () => {

@@ -121,6 +121,104 @@ describe('WireframeRecorder', () => {
     expect(replayed).toBe(expected);
   });
 
+  // rrweb builds an added node without its childNodes.
+  it('replays the text of a view added after the full snapshot', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const row: Wireframe = { id: 12, k: 't', x: 16, y: 300, w: 200, h: 20, tx: 'New row' };
+    const events = [
+      ...r.apply(snap([root, header, title]), 1000, 'h').events,
+      ...r.apply(snap([root, header, row, title]), 2000, 'h').events,
+    ];
+    const replayed = normalize(play(events));
+    expect(replayed).toContain('New row');
+    expect(replayed).toBe(normalize(play(fullOnly([root, header, row, title]))));
+  });
+
+  it('sends a moved picture as a small change of its view, and a new picture once', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const png1 = `data:image/png;base64,${'A'.repeat(4000)}`;
+    const png2 = `data:image/png;base64,${'B'.repeat(4000)}`;
+    const icon: Wireframe = { id: 30, k: 'v', x: 10, y: 400, w: 24, h: 24, img: png1 };
+    const steps = [
+      [root, header, icon],
+      // Moved: only the view's position changes.
+      [root, header, { ...icon, y: 380 }],
+      // A new picture in the same place.
+      [root, header, { ...icon, y: 380, img: png2 }],
+      // No picture: the placeholder.
+      [root, header, { ...icon, y: 380, img: undefined }],
+      // A picture again, and the view moved.
+      [root, header, { ...icon, y: 360, img: png1 }],
+    ];
+    const events: RRWebEvent[] = [];
+    const sizes: number[] = [];
+    steps.forEach((nodes, i) => {
+      const out = r.apply(snap(nodes), 1000 + i * 1000, 'h').events;
+      sizes.push(JSON.stringify(out).length);
+      events.push(...out);
+      // Each step replays to the same DOM as a fresh full snapshot.
+      expect(normalize(play(events))).toBe(normalize(play(fullOnly(nodes))));
+    });
+    expect(events.filter((e) => e.type === EventType.FullSnapshot)).toHaveLength(1);
+    // The move does not carry the picture.
+    expect(sizes[1]).toBeLessThan(500);
+    expect(JSON.stringify(events[3])).not.toContain('AAAA');
+    // The new picture is sent once, as the style of the picture child.
+    expect(sizes[2]).toBeGreaterThan(4000);
+    expect(sizes[2]).toBeLessThan(5000);
+  });
+
+  it('spreads pictures over a budget across captures', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const big = (c: string) => `data:image/png;base64,${c.repeat(150_000)}`;
+    const nodes: Wireframe[] = [
+      root,
+      { id: 40, k: 'v', x: 0, y: 0, w: 100, h: 100, img: big('A') },
+      { id: 41, k: 'v', x: 0, y: 100, w: 100, h: 100, img: big('B') },
+      { id: 42, k: 'v', x: 0, y: 200, w: 100, h: 100, img: big('C') },
+    ];
+    const events: RRWebEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      const out = r.apply(snap(nodes), 1000 + i * 1000, 'h').events;
+      // One picture per event: two would pass the budget.
+      expect(JSON.stringify(out).length).toBeLessThan(160_000);
+      expect(r.hasDeferredPictures).toBe(i < 2);
+      events.push(...out);
+    }
+    expect(r.apply(snap(nodes), 4000, 'h').events).toEqual([]);
+    const html = play(events);
+    for (const c of ['AAAA', 'BBBB', 'CCCC']) expect(html).toContain(c);
+  });
+
+  // A walk that ran out of time returns the first views in draw order only.
+  it('keeps the views a truncated walk did not reach', () => {
+    const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
+    const added: Wireframe = { id: 11, k: 't', x: 16, y: 70, w: 100, h: 20, tx: 'Added' };
+    const steps: WireframeSnapshot[] = [
+      snap([root, header, title, input, image]),
+      // Changed views at the start; the rest was not reached.
+      { ...snap([root, { ...header, bg: '#000000ff' }]), truncated: true },
+      // A new view before the views that were not reached.
+      { ...snap([root, header, added]), truncated: true },
+      // The walk reached the input: the title before it is gone. The
+      // image after it was not reached.
+      { ...snap([root, header, added, { ...input, x: 20 }]), truncated: true },
+    ];
+    const events: RRWebEvent[] = [];
+    steps.forEach((s, i) => events.push(...r.apply(s, 1000 + i * 1000, 'h').events));
+    expect(events.filter((e) => e.type === EventType.FullSnapshot)).toHaveLength(1);
+    const mutations = events.filter((e) => e.type === EventType.IncrementalSnapshot);
+    const removes = mutations.map((e) => (e.data as { removes: unknown[] }).removes.length);
+    // Only the title is removed, by the last snapshot.
+    expect(removes).toEqual([0, 0, 1]);
+    const replayed = normalize(play(events));
+    const expected = normalize(play(fullOnly([root, header, added, { ...input, x: 20 }, image])));
+    expect(replayed).toBe(expected);
+    // A full walk removes what it does not find.
+    const out = r.apply(snap([root, header]), 5000, 'h');
+    expect((out.events[0].data as { removes: unknown[] }).removes).toHaveLength(3);
+  });
+
   it('takes a new full snapshot when the screen is resized or reordered', () => {
     const r = new WireframeRecorder({ textAndInputPrivacy: 'mask-all-inputs' });
     r.apply(snap([root, header, title]), 1000, 'h');
@@ -181,10 +279,15 @@ describe('styleFor', () => {
     expect(style).toContain('line-height:1.2');
   });
 
-  it('draws the picture of a vector drawing, and only a PNG data URL', () => {
+  it('draws the picture of a vector drawing in a child, and only a PNG data URL', () => {
     const png = 'data:image/png;base64,iVBORw0KGgo=';
-    expect(styleFor({ ...base, k: 'v', img: png })).toContain(`background-image:url(${png})`);
-    expect(styleFor({ ...base, k: 'v', img: 'https://example.com/x.png' })).not.toContain('background-image');
+    // The picture is not in the view's own style: a move would send it again.
+    expect(styleFor({ ...base, k: 'v', img: png })).not.toContain('background');
+    expect(styleFor({ ...base, k: 'v', img: 'https://example.com/x.png' })).toContain('background-color:rgba(127,127,127,0.25)');
     expect(styleFor({ ...base, k: 'v' })).toContain('background-color:rgba(127,127,127,0.25)');
+    const events = fullOnly([root, { ...base, id: 20, k: 'v', img: png }, { ...base, id: 21, k: 'v', img: 'https://example.com/x.png' }]);
+    const html = play(events);
+    expect(html.match(/background-image/g)).toHaveLength(1);
+    expect(html).toContain(`url(${png})`);
   });
 });

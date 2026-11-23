@@ -55,6 +55,15 @@ function scheduleWrite() {
   }, 1000);
 }
 
+/**
+ * The session of the last launch, ended. Each launch starts a session of
+ * its own at its first activity, as Datadog's SDKs do, and that session
+ * links to this one (`session_previous_id`). Kept across launches, one
+ * session held the crashes of several runs, and its crash-free rate did
+ * not match Datadog's on the same data. The crash that ended the last run
+ * is still reported on its own session, from the saved context
+ * (`reportPendingCrash`).
+ */
 function load(): SessionData | null {
   const raw = storage.getJSON<Partial<SessionData> | null>(SESSION_KEY, null);
   if (!raw || typeof raw.id !== 'string') return null;
@@ -62,7 +71,7 @@ function load(): SessionData | null {
   return {
     id: raw.id,
     createdAt: raw.createdAt ?? now,
-    lastActivity: raw.lastActivity ?? now,
+    lastActivity: 0,
     viewCount: raw.viewCount ?? 0,
     errorCount: raw.errorCount ?? 0,
     actionCount: raw.actionCount ?? 0,
@@ -119,13 +128,21 @@ function renew(now: number): SessionData {
  * work such as periodic view updates passes false so it cannot keep an
  * idle session alive.
  */
+/**
+ * The live session. Only user activity (`activity`: a tap, a new screen,
+ * a return to the app) starts a new one when the last one ended.
+ * Background work (view refreshes, replay, requests the app makes by
+ * itself) gets the ended session and must drop its event
+ * (`isSessionExpired`): an app left open on one screen would otherwise
+ * start a new session every SESSION_TIMEOUT_MS, as Datadog does not.
+ */
 export function getSession(activity = true): SessionData {
   const now = Date.now();
   if (!loaded) {
     loaded = true;
     current = load();
   }
-  if (!current || expired(current, now)) return renew(now);
+  if (!current || (activity && expired(current, now))) return renew(now);
   if (activity) {
     current.lastActivity = now;
     scheduleWrite();
@@ -134,7 +151,7 @@ export function getSession(activity = true): SessionData {
 }
 
 export function getSessionId(): string {
-  return getSession(false).id;
+  return isSessionExpired() ? '' : getSession(false).id;
 }
 
 /** The session as it is now, without starting or renewing one. */
@@ -144,6 +161,17 @@ export function peekSession(): SessionData | null {
     current = load();
   }
   return current;
+}
+
+/**
+ * False only when the live session is known and not sampled. With no
+ * session, or one that has ended, the next event rolls a new one, and the
+ * renew listeners hear of it.
+ */
+export function isSessionSampled(): boolean {
+  const s = peekSession();
+  if (!s || isSessionExpired()) return true;
+  return s.sampled;
 }
 
 /** True when the stored session would be replaced by the next event. */
