@@ -116,6 +116,17 @@ OodleSessionReplay.start() / .stop() / .isRecording()
 | `beforeSend` | none | Change an event, or return `null` to drop it |
 | `verbosity` | `'warn'` | SDK log level |
 
+A resource has the full URL of the request in `url_full`, with its query
+string, as in other mobile RUM SDKs. If a query string can hold a token or
+personal data, remove it in `beforeSend`:
+
+```ts
+beforeSend: (event) => {
+  if (typeof event.url_full === 'string') event.url_full = event.url_full.split(/[?#]/)[0];
+  return event;
+},
+```
+
 ## Readable stack traces
 
 Release builds have minified JS and, with R8, renamed Java classes.

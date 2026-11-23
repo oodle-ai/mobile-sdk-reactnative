@@ -5,7 +5,7 @@
 // Usage: check-collector.mjs --out <collector dir> --platform android|ios [--expect-tap]
 import fs from 'node:fs';
 import path from 'node:path';
-import { check, finish, flag, opt, outDir, readNdjson } from './collector-lib.mjs';
+import { check, checkCollectorFields, finish, flag, opt, outDir, readNdjson } from './collector-lib.mjs';
 
 const out = outDir();
 const platform = opt('platform', 'android');
@@ -26,6 +26,7 @@ for (const f of ['view_url', 'error_type', 'resource_url', 'browser_name', 'even
   check(events.every((e) => !(f in e)), `no event has the browser field ${f}`);
 }
 check(new Set(events.map((e) => e.log_record_uid)).size === events.length, 'log_record_uid is unique');
+checkCollectorFields(out);
 
 // One session start per session.
 const sessions = new Map();
@@ -44,7 +45,8 @@ check(views.some((v) => v.memory_max_bytes > 0), 'native memory vitals on a view
 // Other event types from the autopilot.
 const resource = of('resource').find((r) => String(r.url_full).includes('/api/orders'));
 check(Boolean(resource), 'resource for /api/orders');
-check(resource && !String(resource.url_full).includes('?'), 'resource URL has no query string');
+// url_full is the URL as the app requested it (screens/Orders.tsx), with its query string.
+check(String(resource?.url_full).endsWith('/orders?driver=driver-ava'), 'resource URL keeps its query string');
 check(resource?.http_request_method === 'GET', 'resource has http_request_method');
 check(typeof resource?.http_response_status_code === 'number', 'resource has http_response_status_code');
 check(Boolean(resource?.trace_id), 'resource to an allowed host has a trace id');

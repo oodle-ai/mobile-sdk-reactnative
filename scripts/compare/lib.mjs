@@ -27,18 +27,23 @@ export function fromOodle(e) {
     error_source: e.error_source,
     is_crash: e.error_is_crash === 1,
     url: e.url_full,
+    trace: e.trace_id,
     time_spent_ms: e.view_time_spent_ms,
     ts: Date.parse(e.timestamp),
   };
 }
 
 export function fromReference(e) {
-  const type = e.type;
+  // The reference Android SDK also sends `view_update`: a partial update of a
+  // view, with only the fields that changed. It is an update of the view.
+  const type = e.type === 'view_update' ? 'view' : e.type;
   const ownId = { action: e.action?.id, error: e.error?.id, resource: e.resource?.id, long_task: e.long_task?.id }[type];
   return {
     sdk: 'reference',
-    // A view is sent as numbered updates of one view id.
-    id: type === 'view' ? `${e.view?.id}:${e._dd?.document_version}` : (ownId ?? `${type}:${e.date}:${e.view?.id}`),
+    // A view is sent as numbered updates of one view id. The Android SDK
+    // can send one update both as a `view_update` and as a full `view`, so
+    // the form is part of the id; a second copy of one form is a duplicate.
+    id: type === 'view' ? `${e.view?.id}:${e._dd?.document_version}:${e.type}` : (ownId ?? `${type}:${e.date}:${e.view?.id}`),
     type,
     session: e.session?.id,
     view: e.view?.id,
@@ -87,6 +92,8 @@ export function readReplay(out) {
 
 export const readLaunches = (out) => readNdjson(path.join(out, 'launches.ndjson'));
 export const readRequests = (out) => readNdjson(path.join(out, 'requests.ndjson'));
+/** The requests that the stand-in app API got: { scenario, method, path, traceparents }. */
+export const readApiRequests = (out) => readNdjson(path.join(out, 'api-requests.ndjson'));
 
 /** Groups a list by a key. */
 export function groupBy(list, key) {
@@ -99,13 +106,24 @@ export function groupBy(list, key) {
   return map;
 }
 
-/** The last update of each view: the one that the collector keeps. */
+/**
+ * The last state of each view: the fields of its highest update, and for
+ * a field that update does not have (a partial `view_update`), the value
+ * of the update before it.
+ */
 export function lastViewUpdates(events) {
   const last = new Map();
   for (const e of events) {
     if (e.type !== 'view') continue;
     const prev = last.get(e.view);
-    if (!prev || (e.seq ?? 0) > (prev.seq ?? 0)) last.set(e.view, e);
+    if (!prev) {
+      last.set(e.view, e);
+      continue;
+    }
+    const [older, newer] = (e.seq ?? 0) > (prev.seq ?? 0) ? [prev, e] : [e, prev];
+    const merged = { ...older };
+    for (const [k, v] of Object.entries(newer)) if (v !== undefined) merged[k] = v;
+    last.set(e.view, merged);
   }
   return [...last.values()];
 }

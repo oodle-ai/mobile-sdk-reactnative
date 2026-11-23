@@ -13,6 +13,8 @@ export type Scenario = {
   /** The seed and the number of steps of a soak walk (src/soak.ts). */
   seed: number;
   steps: number;
+  /** True starts the reference SDK with its debug log, to find why it sends nothing. */
+  debug?: boolean;
 };
 
 export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12 };
@@ -48,6 +50,7 @@ export async function fetchScenario(): Promise<Scenario> {
       replay: body.replay !== false,
       seed: int(body.seed, NO_SCENARIO.seed),
       steps: int(body.steps, NO_SCENARIO.steps),
+      debug: body.debug === true,
     };
   } catch {
     return NO_SCENARIO;

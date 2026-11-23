@@ -10,6 +10,7 @@ import { Orders } from './src/screens/Orders';
 import { fetchScenario, NO_SCENARIO, runScenario, type Scenario } from './src/scenario';
 import { type TelemetryProvider as Provider } from './src/config';
 import { currentProvider, setReferenceFirst, setProvider, telemetry } from './src/telemetry';
+import { setReferenceDebug } from './src/telemetry/reference';
 import { TelemetryProvider } from './src/telemetry/provider';
 
 const TABS: Tab[] = ['Home', 'Orders', 'Comms', 'More'];
@@ -32,6 +33,7 @@ export default function App() {
       .then((s) => {
         setScenario(s);
         setReferenceFirst(s.order === 'reference-first');
+        setReferenceDebug(s.debug === true);
         if (s.provider) setProvider(s.provider);
         setProviderState(currentProvider());
         return telemetry.initialize(true, s.replay);

@@ -33,7 +33,7 @@ export function parseEnvelope(text) {
     }
     // The size of the section in the body, so that a report can split the
     // bytes of one body between events and replay.
-    sections.push({ type: head.type, items, bytes: Buffer.byteLength(lines[i]) + Buffer.byteLength(lines[i + 1]) + 2 });
+    sections.push({ type: head.type, head, items, bytes:Buffer.byteLength(lines[i]) + Buffer.byteLength(lines[i + 1]) + 2 });
   }
   return { header, sections };
 }

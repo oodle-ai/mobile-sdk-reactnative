@@ -53,6 +53,14 @@ stop_collector() {
   fi
 }
 
+# The first start after an install is slow on a cold emulator, and the app
+# reads its scenario with a short timeout: the first soak launch then ran
+# without its scenario. One start first warms the app up. soak.sh clears
+# the app data, so this start leaves nothing behind.
+start_app
+sleep 20
+kill_app
+
 status=0
 if [ "${SKIP_PARITY:-0}" != 1 ]; then
   start_collector "$OUT/parity"

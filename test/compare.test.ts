@@ -10,6 +10,8 @@ import zlib from 'node:zlib';
 import { afterEach, describe, expect, it } from 'vitest';
 // @ts-expect-error: a plain JS module of the CI scripts.
 import { parseReferenceReplay, parseReferenceRum, parseEnvelope, parseMultipart } from '../scripts/intake.mjs';
+// @ts-expect-error: a plain JS module of the CI scripts.
+import { fromReference, lastViewUpdates } from '../scripts/compare/lib.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
 const API = 'http://10.0.2.2:4319/api';
@@ -83,6 +85,40 @@ describe('intake parsers', () => {
   });
 });
 
+describe('the reference SDK view updates', () => {
+  // The reference Android SDK sends partial `view_update` events, and can
+  // send one update both as a `view_update` and as a full `view`.
+  const view = (v: number, extra: Record<string, unknown> = {}) => ({
+    type: 'view',
+    date: 1000,
+    _dd: { document_version: v },
+    session: { id: 's' },
+    view: { id: 'v1', name: 'Home', time_spent: 1e9, is_active: true, ...extra },
+  });
+  const update = (v: number, extra: Record<string, unknown>) => ({
+    type: 'view_update',
+    date: 1000,
+    _dd: { document_version: v },
+    session: { id: 's' },
+    view: { id: 'v1', ...extra },
+  });
+
+  it('reads a view_update as an update of its view, not as a duplicate', () => {
+    const events = [view(1), update(2, { time_spent: 3e9 }), update(3, { time_spent: 5e9, is_active: false }), view(3)].map(fromReference);
+    expect(events.every((e) => e.type === 'view')).toBe(true);
+    expect(new Set(events.map((e) => e.id)).size).toBe(4);
+    // The last state has the fields of the highest update, and the name
+    // from the full view that the partial updates leave out.
+    const [last] = lastViewUpdates(events);
+    expect(last).toMatchObject({ screen: 'Home', seq: 3, time_spent_ms: 5000, active: false });
+  });
+
+  it('still finds a view_update that arrives twice', () => {
+    const events = [view(1), update(2, { time_spent: 3e9 }), update(2, { time_spent: 3e9 })].map(fromReference);
+    expect(new Set(events.map((e) => e.id)).size).toBe(2);
+  });
+});
+
 // --- The collector, parity.mjs and cost.mjs together ---
 
 const freePort = () =>
@@ -103,8 +139,16 @@ afterEach(() => {
 
 async function startCollector(out: string) {
   const port = await freePort();
-  collector = spawn(process.execPath, [path.join(ROOT, 'scripts/mock-collector.mjs'), '--port', String(port), '--out', out]);
-  await new Promise<void>((resolve) => collector!.stdout!.on('data', (d) => String(d).includes('mock collector on') && resolve()));
+  const apiPort = await freePort();
+  collector = spawn(process.execPath, [path.join(ROOT, 'scripts/mock-collector.mjs'), '--port', String(port), '--api-port', String(apiPort), '--out', out]);
+  // Both servers listen before the tests send to them.
+  let seen = '';
+  await new Promise<void>((resolve) =>
+    collector!.stdout!.on('data', (d) => {
+      seen += String(d);
+      if (seen.includes('mock collector on') && seen.includes('stand-in app API on')) resolve();
+    }),
+  );
   const base = `http://127.0.0.1:${port}`;
   const post = (url: string, body: Buffer | string, headers: Record<string, string> = {}) =>
     fetch(`${base}${url}`, { method: 'POST', body, headers }).then((r) => r.status);
@@ -127,6 +171,11 @@ async function startCollector(out: string) {
       const { body, contentType } = referenceReplayBody(session);
       return post('/reference/replay', body, { 'content-type': contentType });
     },
+    /** A request of the app to the stand-in API, with its traceparent values on one line. */
+    api: (name: string, traceparents: string[] = []) =>
+      fetch(`http://127.0.0.1:${apiPort}/api/${name}?seed=1`, {
+        headers: traceparents.length ? { traceparent: traceparents.join(', ') } : {},
+      }).then((r) => r.status),
   };
 }
 
@@ -212,6 +261,53 @@ describe('comparison scripts', () => {
     expect(r.status).toBe(0);
     const report = JSON.parse(fs.readFileSync(path.join(out, 'parity.json'), 'utf8'));
     expect(report.checks.filter((c: { differ: number }) => c.differ > 0)).toEqual([]);
+  });
+
+  // The stand-in app API sees every request of the app, so it shows which
+  // SDK is wrong when they differ.
+  const TRACE = '0af7651916cd43dd8448eb211c80319c';
+  const OODLE_TP = `00-${TRACE}-b7ad6b7169203331-01`;
+  async function apiRun(traceparents: string[], referenceSteps: Step[]) {
+    const out = tmp();
+    const c = await startCollector(out);
+    const launch = 'soak-both-on-r1-1';
+    await c.scenario({ name: launch, provider: 'both' });
+    expect(await c.api('soak/3', traceparents)).toBe(200);
+    const t0 = Date.now() - 5000;
+    const oodle = oodleLaunch(launch, 'oo-1', STEPS, t0).map((e) =>
+      (e as { event_type?: string }).event_type === 'resource' ? { ...e, trace_id: TRACE } : e,
+    );
+    await c.oodle(oodle, [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 2 }] }]);
+    await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0));
+    await c.referenceReplay('ref-1');
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900) + '\n');
+    const api = fs.readFileSync(path.join(out, 'api-requests.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    expect(api).toEqual([expect.objectContaining({ scenario: launch, method: 'GET', path: '/api/soak/3', traceparents })]);
+    return out;
+  }
+
+  it('reports a request that the reference SDK lost, and passes when Oodle has what the API got', async () => {
+    const out = await apiRun([OODLE_TP], STEPS.filter((s) => s.kind !== 'request'));
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/diff api-requests \(reference\): differs in 1 of 1/);
+    expect(r.stdout).toMatch(/ok {3}api-requests: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/ok {3}trace-link: differs in 0 of 1/);
+    expect(r.status).toBe(0);
+  });
+
+  it('fails when a request carries two traceparents', async () => {
+    const referenceTp = '00-6b0437ba000000006a1afad9bd587e2b-cae6ce09b5150042-01';
+    const out = await apiRun([OODLE_TP, referenceTp], STEPS);
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL one-traceparent: differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  it('fails when Oodle records a trace that did not reach the API', async () => {
+    const out = await apiRun(['00-11111111111111111111111111111111-2222222222222222-01'], STEPS);
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL trace-link: differs in 1 of 1/);
+    expect(r.status).toBe(1);
   });
 
   it('fails when one SDK lost an action', async () => {
