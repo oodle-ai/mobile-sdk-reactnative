@@ -1,10 +1,25 @@
-import { wait } from './autopilot';
-import { collectorUrl } from './config';
+import { type Tab, wait } from './autopilot';
+import { collectorUrl, type TelemetryProvider } from './config';
+import { runSoak } from './soak';
 import { telemetry } from './telemetry';
 
-export type Scenario = { name: string; order: 'oodle-first' | 'datadog-first' };
+export type Scenario = {
+  name: string;
+  order: 'oodle-first' | 'datadog-first';
+  /** The SDKs that this start of the app runs. When not set, the build's provider. */
+  provider?: TelemetryProvider;
+  /** False starts the SDKs without session replay. */
+  replay: boolean;
+  /** The seed and the number of steps of a soak walk (src/soak.ts). */
+  seed: number;
+  steps: number;
+};
 
-export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first' };
+export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12 };
+
+const PROVIDERS: TelemetryProvider[] = ['none', 'oodle', 'datadog', 'both'];
+const int = (value: unknown, fallback: number) =>
+  typeof value === 'number' && Number.isInteger(value) && value > 0 ? value : fallback;
 
 // scripts/ci/check-scenarios.mjs keeps copies of these two values.
 /** The message of the JS fatal error. */
@@ -29,6 +44,10 @@ export async function fetchScenario(): Promise<Scenario> {
     return {
       name: typeof body.name === 'string' && body.name ? body.name : 'none',
       order: body.order === 'datadog-first' ? 'datadog-first' : 'oodle-first',
+      provider: PROVIDERS.find((p) => p === body.provider),
+      replay: body.replay !== false,
+      seed: int(body.seed, NO_SCENARIO.seed),
+      steps: int(body.steps, NO_SCENARIO.steps),
     };
   } catch {
     return NO_SCENARIO;
@@ -39,9 +58,11 @@ export async function fetchScenario(): Promise<Scenario> {
  * Runs the app's part of a CI scenario. Every scenario first sends the
  * action "scenario:<name>", so the checks can find the session that the
  * scenario ran in. Crashes that come from outside the app (a signal, a
- * JVM crash from adb) and the kill are done by the CI script.
+ * JVM crash from adb) and the kill are done by the CI script. A soak
+ * scenario (a name that starts with "soak") runs the walk in src/soak.ts.
  */
-export function runScenario(scenario: Scenario): () => void {
+export function runScenario(scenario: Scenario, go: (tab: Tab) => void): () => void {
+  if (scenario.name.startsWith('soak')) return runSoak(scenario.name, scenario.seed, scenario.steps, go);
   let stopped = false;
   void (async () => {
     // Let the first view reach the collector first.

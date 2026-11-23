@@ -19,15 +19,10 @@ EVENTS="$OUT/events.ndjson"
 DATADOG="$OUT/datadog.ndjson"
 RAN="$OUT/scenarios.txt"
 : > "$RAN"
+# app_pid, start_app, kill_app.
+. "$HERE/device.sh"
 
 if [ "$PLATFORM" = android ]; then
-  PKG=com.oodleexample
-  app_pid() { adb shell pidof "$PKG" 2> /dev/null | tr -d '\r' || true; }
-  start_app() {
-    adb shell am force-stop "$PKG"
-    adb shell am start -W -n "$PKG/.MainActivity" > /dev/null
-  }
-  kill_app() { adb shell am force-stop "$PKG"; }
   # A JVM exception on the main thread of the app.
   jvm_crash() { adb shell am crash "$PKG"; }
   # A fatal signal. The shell user cannot signal an app process, so this
@@ -53,13 +48,6 @@ if [ "$PLATFORM" = android ]; then
   adb logcat -c || true
   trap 'adb logcat -d > "$OUT/scenarios-logcat.txt" 2> /dev/null || true' EXIT
 else
-  BUNDLE=org.reactjs.native.example.OodleExample
-  app_pid() {
-    xcrun simctl spawn booted launchctl list |
-      awk -v b="$BUNDLE" 'index($3, b) && $1 != "-" { print $1 }' | head -1
-  }
-  start_app() { xcrun simctl launch --terminate-running-process booted "$BUNDLE" > /dev/null; }
-  kill_app() { xcrun simctl terminate booted "$BUNDLE" || true; }
   # Simulator apps are processes of the host user, so the host can signal them.
   signal_crash() { kill -SEGV "$(app_pid)"; }
   after_crash() { :; }

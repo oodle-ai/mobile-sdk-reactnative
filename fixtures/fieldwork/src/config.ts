@@ -1,7 +1,7 @@
 import { Platform } from 'react-native';
 import { fixtureEnv } from './fixture-env';
 
-export type TelemetryProvider = 'oodle' | 'datadog' | 'both';
+export type TelemetryProvider = 'none' | 'oodle' | 'datadog' | 'both';
 
 export const telemetryProvider: TelemetryProvider = fixtureEnv.provider;
 export const autopilot: boolean = fixtureEnv.autopilot;

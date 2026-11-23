@@ -5,7 +5,7 @@
 # side. CI builds and runs it to check that both SDKs compile and load
 # in one app, on each platform and React Native version.
 #
-# Usage: create-fixture.sh <react-native version> <sdk tarball> [oodle|datadog|both]
+# Usage: create-fixture.sh <react-native version> <sdk tarball> [none|oodle|datadog|both]
 set -euo pipefail
 
 RN_VERSION="${1:?React Native version}"
@@ -31,7 +31,7 @@ rm -rf src
 cp -R "$REPO/fixtures/fieldwork/src" src
 cat > src/fixture-env.ts <<TS
 // Written by scripts/ci/create-fixture.sh.
-export const fixtureEnv: { provider: 'oodle' | 'datadog' | 'both'; autopilot: boolean } = {
+export const fixtureEnv: { provider: 'none' | 'oodle' | 'datadog' | 'both'; autopilot: boolean } = {
   provider: '$PROVIDER',
   autopilot: true,
 };

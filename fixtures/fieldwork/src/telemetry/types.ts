@@ -4,7 +4,8 @@ import type { User } from '../model';
 // the SDKs the way that app does.
 export type Attributes = Record<string, string | number | boolean>;
 export type Telemetry = {
-  initialize(consent: boolean): Promise<string>;
+  /** `replay` false starts the SDK without session replay. Default true. */
+  initialize(consent: boolean, replay?: boolean): Promise<string>;
   view(key: string, name: string): void;
   action(name: string, attributes?: Attributes): void;
   error(error: unknown, attributes?: Attributes): void;

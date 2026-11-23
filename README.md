@@ -193,6 +193,15 @@ Point an emulator at the mock collector with
 `endpoint: 'http://10.0.2.2:4318'` (Android) or `'http://localhost:4318'`
 (iOS simulator). Plain HTTP is accepted only for local and private hosts.
 
+To compare the SDK with the Datadog SDK on a fixture build
+(`scripts/ci/create-fixture.sh`), with the emulator or simulator running:
+
+```bash
+REPLAY=on bash scripts/compare/run.sh android app-release.apk out/
+# out/parity/parity.md: where the two SDKs report the same launches differently
+# out/cost/cost.md:     CPU, memory, bytes and requests of each SDK, against no SDK
+```
+
 ## License
 
 Apache-2.0

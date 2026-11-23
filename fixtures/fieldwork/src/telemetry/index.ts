@@ -1,4 +1,4 @@
-import { telemetryProvider } from '../config';
+import { telemetryProvider, type TelemetryProvider } from '../config';
 import { datadog } from './datadog';
 import { oodle } from './oodle';
 import type { Telemetry } from './types';
@@ -15,20 +15,20 @@ export function setDatadogFirst(value: boolean) {
   datadogFirst = value;
 }
 
-const start = (sdk: Telemetry, consent: boolean) =>
-  sdk.initialize(consent).catch((reason: unknown) => `failed: ${String(reason)}`);
+const start = (sdk: Telemetry, consent: boolean, replay?: boolean) =>
+  sdk.initialize(consent, replay).catch((reason: unknown) => `failed: ${String(reason)}`);
 
 /** Sends every call to both SDKs, as an app does that runs both. */
 const both: Telemetry = {
   // One SDK at a time, so the order in which they install their crash
   // handlers is the order that the CI scenario names.
-  async initialize(consent) {
+  async initialize(consent, replay) {
     if (datadogFirst) {
-      const dd = await start(datadog, consent);
-      return `${await start(oodle, consent)} + ${dd}`;
+      const dd = await start(datadog, consent, replay);
+      return `${await start(oodle, consent, replay)} + ${dd}`;
     }
-    const oo = await start(oodle, consent);
-    return `${oo} + ${await start(datadog, consent)}`;
+    const oo = await start(oodle, consent, replay);
+    return `${oo} + ${await start(datadog, consent, replay)}`;
   },
   view: (key, name) => {
     oodle.view(key, name);
@@ -59,7 +59,57 @@ const both: Telemetry = {
   operation: (name, key, action) => oodle.operation(name, key, () => datadog.operation(name, key, action)),
 };
 
-export const telemetry: Telemetry =
-  telemetryProvider === 'oodle' ? oodle : telemetryProvider === 'datadog' ? datadog : both;
-export const telemetryName =
-  telemetryProvider === 'oodle' ? 'Oodle RUM' : telemetryProvider === 'datadog' ? 'Datadog RUM' : 'Oodle RUM + Datadog RUM';
+/**
+ * Starts no SDK. The cost runs (scripts/compare/cost.sh) use it as the
+ * baseline that each SDK is measured against.
+ */
+const none: Telemetry = {
+  initialize: async () => 'No telemetry',
+  view: () => undefined,
+  action: () => undefined,
+  error: () => undefined,
+  user: async () => undefined,
+  consent: async () => undefined,
+  replay: async () => undefined,
+  ready: () => undefined,
+  sessionId: async () => undefined,
+  operation: (_name, _key, action) => action(),
+};
+
+const adapters: Record<TelemetryProvider, Telemetry> = { none, oodle, datadog, both };
+const names: Record<TelemetryProvider, string> = {
+  none: 'None',
+  oodle: 'Oodle RUM',
+  datadog: 'Datadog RUM',
+  both: 'Oodle RUM + Datadog RUM',
+};
+
+let provider: TelemetryProvider = telemetryProvider;
+
+/**
+ * Chooses the SDKs that the next initialize() starts. A CI scenario can
+ * choose them for each start of the app, so one build of the fixture
+ * runs every comparison. Call it before initialize().
+ */
+export function setProvider(value: TelemetryProvider) {
+  provider = value;
+}
+
+export const currentProvider = () => provider;
+export const telemetryName = () => names[provider];
+
+const active = () => adapters[provider];
+
+/** Sends each call to the SDKs that setProvider() chose. */
+export const telemetry: Telemetry = {
+  initialize: (consent, replay) => active().initialize(consent, replay),
+  view: (key, name) => active().view(key, name),
+  action: (name, attributes) => active().action(name, attributes),
+  error: (error, attributes) => active().error(error, attributes),
+  user: (user) => active().user(user),
+  consent: (granted) => active().consent(granted),
+  replay: (record) => active().replay(record),
+  ready: () => active().ready(),
+  sessionId: () => active().sessionId(),
+  operation: (name, key, action) => active().operation(name, key, action),
+};

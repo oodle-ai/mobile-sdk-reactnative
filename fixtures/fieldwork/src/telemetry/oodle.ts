@@ -8,7 +8,7 @@ let viewReady = false;
 let displayed = false;
 
 export const oodle: Telemetry = {
-  async initialize(consent) {
+  async initialize(consent, replay = true) {
     const ok = OodleRum.init({
       instanceId: oodleConfig.instanceId,
       apiKey: oodleConfig.apiKey,
@@ -22,7 +22,7 @@ export const oodle: Telemetry = {
       flushIntervalMs: 2000,
       verbosity: 'debug',
       tags: { 'demo.name': 'fieldwork-one', 'data.synthetic': true },
-      sessionReplay: {
+      sessionReplay: replay && {
         sampleRate: 100,
         textAndInputPrivacy: 'mask-all-inputs',
         touchPrivacy: 'show',

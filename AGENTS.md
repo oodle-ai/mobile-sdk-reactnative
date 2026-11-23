@@ -150,4 +150,20 @@ device log in `scenarios-logcat.txt` in the collector artifact. A crash handler 
 crash on breaks the other SDK, and that is what customers who move from
 Datadog run.
 
+The `Compare with Datadog` workflow (`scripts/compare/run.sh`, each week
+and on request) runs the same fixture build with a soak walk
+(`fixtures/fieldwork/src/soak.ts`) from a seed. The scenario chooses the
+SDKs of each launch (`provider`: `none`, `oodle`, `datadog`, `both`) and
+replay, so one build serves every run.
+
+- Parity: both SDKs on the same launches; `parity.mjs` fails on a
+  difference that `parity-allowlist.json` does not explain. Where the
+  two differ, one is wrong. Datadog's behavior is what customers who
+  move from it expect.
+- Cost: no SDK, Oodle and Datadog in turn, on the same walks and device;
+  `cost.mjs` reports CPU, memory, start time, frames, bytes and requests
+  against the launches with no SDK. Every measure comes from outside the
+  app (`scripts/ci/device.sh`). CI emulators render in software, so
+  measure frames and start time on a real device before you quote them.
+
 Write new prose and comments in Simplified Technical English.

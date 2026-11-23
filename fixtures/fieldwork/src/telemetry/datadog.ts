@@ -20,6 +20,7 @@ import { apiHost, collectorUrl, ddConfig } from '../config';
 import type { Telemetry } from './types';
 
 let enabled = false;
+let replayEnabled = false;
 let currentView: string | undefined;
 let transitions: Promise<unknown> = Promise.resolve();
 const quietly = (p: Promise<unknown>) => void p.catch(() => undefined);
@@ -28,7 +29,7 @@ const quietly = (p: Promise<unknown>) => void p.catch(() => undefined);
 // that touch the same app hooks as the Oodle SDK: XHR, the global error
 // handler, crash handlers, session replay and native vitals.
 export const datadog: Telemetry = {
-  async initialize(consent) {
+  async initialize(consent, replay = true) {
     const config = new CoreConfiguration(
       ddConfig.clientToken,
       ddConfig.env,
@@ -65,13 +66,17 @@ export const datadog: Telemetry = {
     );
     await DdSdkReactNative.initialize(config);
     enabled = true;
+    if (!replay) return 'Datadog enabled without replay';
     await SessionReplay.enable({
       replaySampleRate: 100,
+      // The mock collector measures the replay uploads of both SDKs.
+      customEndpoint: `${collectorUrl}/datadog/replay`,
       textAndInputPrivacyLevel: TextAndInputPrivacyLevel.MASK_ALL_INPUTS,
       imagePrivacyLevel: ImagePrivacyLevel.MASK_ALL,
       touchPrivacyLevel: TouchPrivacyLevel.SHOW,
       startRecordingImmediately: consent,
     });
+    replayEnabled = true;
     return 'Datadog enabled';
   },
   view(key, name) {
@@ -105,7 +110,7 @@ export const datadog: Telemetry = {
     await DdSdkReactNative.setTrackingConsent(granted ? TrackingConsent.GRANTED : TrackingConsent.NOT_GRANTED);
   },
   async replay(record) {
-    if (!enabled) return;
+    if (!enabled || !replayEnabled) return;
     await (record ? SessionReplay.startRecording() : SessionReplay.stopRecording());
   },
   ready() {

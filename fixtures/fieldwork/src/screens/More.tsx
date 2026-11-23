@@ -11,7 +11,7 @@ export function More() {
   }, []);
   return (
     <View style={styles.screen}>
-      <Text style={styles.row}>Telemetry: {telemetryName}</Text>
+      <Text style={styles.row}>Telemetry: {telemetryName()}</Text>
       <Text style={styles.row}>Session: {session ?? '...'}</Text>
       <View style={styles.toggle}>
         <Text>Session replay</Text>
