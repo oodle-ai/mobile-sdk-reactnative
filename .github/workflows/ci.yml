@@ -124,22 +124,71 @@ jobs:
         with:
           node-version: 22
       - run: scripts/ci/create-fixture.sh "${{ matrix.react-native }}" oodle-ai-mobile-sdk-reactnative-*.tgz both
+      # React Native before 0.81 has no prebuilt core, so the build
+      # compiles it from source. ccache keeps the compiled objects between
+      # runs. xcodebuild starts it as C_COMPILER_LAUNCHER. Do not set
+      # USE_CCACHE: the React Native compiler wrapper that it turns on
+      # runs plain clang under Xcode 16.
+      - name: Install ccache
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: command -v ccache || brew install ccache
       - name: Install pods
         working-directory: ${{ env.FIXTURE_DIR }}/ios
         run: |
           bundle install
           bundle exec pod install
+      # The fixture is outside the workspace, so hashFiles cannot read
+      # its Podfile.lock.
+      - name: Make the ccache key
+        id: ccache-key
+        working-directory: ${{ env.FIXTURE_DIR }}/ios
+        run: echo "key=ccache-v2-ios-${{ matrix.react-native }}-$(shasum -a 256 Podfile.lock | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      # ccache uses its default directory and configuration file, so the
+      # compiler processes that Xcode starts find them without environment
+      # variables. The settings are the ones in React Native's
+      # scripts/xcode/ccache.conf.
+      - name: Restore ccache
+        id: ccache-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.ccache-key.outputs.key }}
+          restore-keys: ccache-v2-ios-${{ matrix.react-native }}-
+      - name: Configure ccache
+        run: |
+          ccache --set-config max_size=3G
+          ccache --set-config sloppiness=clang_index_store,file_stat_matches,include_file_ctime,include_file_mtime,ivfsoverlay,pch_defines,modules,system_headers,time_macros
+          ccache --set-config file_clone=true
+          ccache --set-config depend_mode=true
+          ccache --set-config inode_cache=true
+          ccache -p | grep -v '(default)'
+          ccache -z > /dev/null
+      # Only arm64: the runner is arm64, and a generic destination in
+      # Release otherwise builds x86_64 too. Explicit modules are off, as
+      # Xcode advises for a compiler launcher that it does not know.
       - name: Build for the simulator
         working-directory: ${{ env.FIXTURE_DIR }}/ios
         run: |
+          mkdir -p "$RUNNER_TEMP/collector"
+          LOG="$RUNNER_TEMP/collector/xcodebuild.log"
           if ! xcodebuild -workspace OodleExample.xcworkspace -scheme OodleExample \
             -configuration Release -sdk iphonesimulator \
             -destination 'generic/platform=iOS Simulator' \
-            -derivedDataPath build CODE_SIGNING_ALLOWED=NO build > "$RUNNER_TEMP/xcodebuild.log" 2>&1; then
-            grep -E "error:|The following build commands failed" -A4 "$RUNNER_TEMP/xcodebuild.log" | head -150
+            -derivedDataPath build ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            C_COMPILER_LAUNCHER="$(command -v ccache)" CLANG_ENABLE_EXPLICIT_MODULES=NO \
+            CODE_SIGNING_ALLOWED=NO build > "$LOG" 2>&1; then
+            grep -E "error:|The following build commands failed" -A4 "$LOG" | head -150
             exit 1
           fi
-          tail -5 "$RUNNER_TEMP/xcodebuild.log"
+          tail -5 "$LOG"
+          ccache -s
+      - name: Save ccache
+        if: steps.ccache-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ${{ steps.ccache-key.outputs.key }}
       - name: Start the mock collector
         run: |
           mkdir -p "$RUNNER_TEMP/collector"
