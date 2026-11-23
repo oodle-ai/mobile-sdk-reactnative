@@ -4,7 +4,12 @@
 // SDKs saw the same app, so where they differ, one of them is wrong.
 //
 // Each launch is found in each SDK by the session that holds the action
-// "scenario:<launch name>". Checks:
+// "scenario:<launch name>". The requests of the app are checked against
+// what the stand-in app API got (api-requests.ndjson), so a difference
+// shows which SDK is wrong: Oodle must match the API, and a request that
+// The reference SDK lost is reported. Each request must also carry at most one
+// traceparent, and the trace that Oodle records must be one the API got.
+// Checks:
 //   must  a difference fails the run, unless parity-allowlist.json lists it
 //   info  a difference is reported; with --strict it fails as a must check
 //
@@ -18,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, opt, outDir } from '../ci/collector-lib.mjs';
-import { groupBy, lastViewUpdates, readEvents, readLaunches, readReplay, tally, writeReport } from './lib.mjs';
+import { groupBy, lastViewUpdates, readApiRequests, readEvents, readLaunches, readReplay, tally, writeReport } from './lib.mjs';
 
 const out = outDir();
 const platform = opt('platform', 'android');
@@ -52,12 +57,22 @@ if (!launches.length) {
   launches.push(...[...names].sort());
 }
 
-/** Results of each check: { level, rows: [{ launch, oodle, reference, same }] }. */
+/**
+ * Results of each check: { level, labels, rows: [{ launch, oodle, reference, same }] }.
+ * `labels` names the two values of a check that does not compare Oodle
+ * with the reference SDK (for example Oodle with the app API).
+ */
 const results = new Map();
-function compare(check, level, launch, oodle, reference, same = oodle === reference) {
-  if (!results.has(check)) results.set(check, { level, rows: [] });
+function compare(check, level, launch, oodle, reference, same = oodle === reference, labels = undefined) {
+  if (!results.has(check)) results.set(check, { level, labels, rows: [] });
   results.get(check).rows.push({ launch, oodle, reference, same });
 }
+
+// What the app really sent, as the stand-in app API got it. Where the
+// two SDKs differ on requests, it shows which one is wrong.
+const apiRequests = readApiRequests(out);
+const apiByLaunch = groupBy(apiRequests, (r) => r.scenario);
+const haveApiLog = apiRequests.length > 0;
 
 const isApiRequest = (e) => e.type === 'resource' && /:4319\//.test(String(e.url));
 const path0 = (url) => String(url).replace(/^[a-z]+:\/\/[^/]+/, '').replace(/\?.*$/, '');
@@ -89,7 +104,26 @@ for (const launch of launches) {
     tally(ev.filter((e) => e.type === 'error' && e.error_source === 'custom').map((e) => e.name)),
   );
   check('crashes', 'must', (ev) => ev.filter((e) => e.type === 'error' && e.is_crash).length);
-  check('api-requests', 'must', (ev) => tally(ev.filter(isApiRequest).map((e) => path0(e.url))));
+  const [oodleApi, referenceApi] = per((ev) => tally(ev.filter(isApiRequest).map((e) => path0(e.url))));
+  if (haveApiLog) {
+    // Each SDK against what the API got. Oodle must match it; a request
+    // that the reference SDK lost is reported, and does not fail the run.
+    const sent = apiByLaunch.get(launch) ?? [];
+    const truth = tally(sent.map((r) => r.path));
+    compare('api-requests', 'must', launch, oodleApi, truth, oodleApi === truth, ['Oodle', 'app API']);
+    compare('api-requests (reference)', 'info', launch, referenceApi, truth, referenceApi === truth, ['reference', 'app API']);
+    // The trace that Oodle records for a request is the one that reached
+    // the API, so the RUM resource links to the backend trace.
+    const sentTraces = new Set(sent.flatMap((r) => r.traceparents.map((t) => t.split('-')[1])));
+    const traced = of('oodle').filter((e) => isApiRequest(e) && e.trace);
+    const unknown = traced.filter((e) => !sentTraces.has(e.trace)).length;
+    compare('trace-link', 'must', launch, `${traced.length - unknown} of ${traced.length}`, `${traced.length} of ${traced.length}`, unknown === 0, [
+      'Oodle traces that reached the API',
+      'expected',
+    ]);
+  } else {
+    compare('api-requests', 'must', launch, oodleApi, referenceApi);
+  }
   check('screens', 'must', (ev) => [...new Set(lastViewUpdates(ev).map((v) => v.screen))].sort().join(', '));
   check('views', 'info', (ev) => lastViewUpdates(ev).length);
   check('views-closed', 'info', (ev) => lastViewUpdates(ev).filter((v) => v.active === false).length);
@@ -112,18 +146,32 @@ for (const launch of launches) {
   compare('time-spent', 'info', launch, fmt(oodleTime), fmt(referenceTime), close);
 
   const [oodleReplay, referenceReplay] = SDKS.map((sdk) => replayBySession[sdk].get(session[sdk]) ?? []);
-  if (replay === 'on') {
-    const has = (segs) => (segs.length === 0 ? 'none' : segs.some((s) => s.full) ? 'full snapshot' : 'no full snapshot');
-    compare('replay', 'must', launch, has(oodleReplay), has(referenceReplay), has(oodleReplay) === 'full snapshot' && has(referenceReplay) === 'full snapshot');
-  } else {
-    compare('replay', 'must', launch, oodleReplay.length, referenceReplay.length, oodleReplay.length === 0 && referenceReplay.length === 0);
-  }
+  // Each SDK against what the run expects: a replay with a full snapshot
+  // when replay is on, and none when it is off. Each SDK has its own
+  // check, so an allowlist entry for one SDK does not hide the other.
+  const has = (segs) => (segs.length === 0 ? 'none' : segs.some((s) => s.full) ? 'full snapshot' : 'no full snapshot');
+  const expected = replay === 'on' ? 'full snapshot' : 'none';
+  compare('replay', 'must', launch, has(oodleReplay), expected, has(oodleReplay) === expected, ['Oodle', 'expected']);
+  compare('replay (reference)', 'must', launch, has(referenceReplay), expected, has(referenceReplay) === expected, ['reference', 'expected']);
 }
 
 // Over the whole run: an event that arrives twice counts twice.
 const dupes = Object.fromEntries(SDKS.map((sdk) => [sdk, events[sdk].length - new Set(events[sdk].map((e) => e.id)).size]));
 compare('no-duplicates', 'must', 'all', dupes.oodle, dupes.reference, dupes.oodle === 0 && dupes.reference === 0);
 compare('sessions', 'info', 'all', bySession.oodle.size, bySession.reference.size);
+// Two SDKs that each add a traceparent give a request two of them, which a
+// backend can reject or read as the wrong trace. Each request must carry
+// at most one.
+if (haveApiLog) {
+  const ours = new Set(launches);
+  const sent = apiRequests.filter((r) => ours.has(r.scenario));
+  const doubled = sent.filter((r) => r.traceparents.length > 1);
+  const example = doubled[0] ? `${doubled[0].path}: ${doubled[0].traceparents.join(', ')}` : '';
+  compare('one-traceparent', 'must', 'all', `${doubled.length} of ${sent.length}`, example || '0', doubled.length === 0, [
+    'requests with more than one traceparent',
+    'first',
+  ]);
+}
 // Replay size is a measure, not a check: cost.mjs compares bytes on the wire.
 const replayKb = (sdk) => Math.round(replaySegments[sdk].reduce((n, s) => n + s.bytes, 0) / 1024);
 if (replay === 'on') compare('replay-kb (decoded)', 'info', 'all', replayKb('oodle'), replayKb('reference'), true);
@@ -134,10 +182,10 @@ let failed = 0;
 const lines = [
   `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches)`,
   '',
-  '| Check | Level | Result | Differs in | Example (Oodle / reference) |',
+  '| Check | Level | Result | Differs in | Example (Oodle / reference, unless named) |',
   '|---|---|---|---|---|',
 ];
-for (const [name, { level, rows }] of results) {
+for (const [name, { level, labels, rows }] of results) {
   const differ = rows.filter((r) => !r.same);
   const reason = differ.length ? allowed(name) : undefined;
   const fails = differ.length > 0 && !reason && (level === 'must' || strict);
@@ -145,7 +193,11 @@ for (const [name, { level, rows }] of results) {
   const result = differ.length === 0 ? 'same' : reason ? `allowed: ${reason}` : fails ? '**FAIL**' : 'differs';
   // The first difference, or for a measure, its values.
   const ex = differ[0] ?? (level === 'info' && rows.length === 1 ? rows[0] : undefined);
-  const example = ex ? `${ex.launch}: \`${ex.oodle}\` / \`${ex.reference}\`` : '';
+  const example = !ex
+    ? ''
+    : labels
+      ? `${ex.launch}: ${labels[0]} \`${ex.oodle}\` / ${labels[1]} \`${ex.reference}\``
+      : `${ex.launch}: \`${ex.oodle}\` / \`${ex.reference}\``;
   lines.push(`| ${name} | ${level} | ${result} | ${differ.length} of ${rows.length} | ${example.replace(/\|/g, '\\|')} |`);
   summary.push({ check: name, level, differ: differ.length, of: rows.length, result, examples: differ.slice(0, 5) });
   console.log(`${fails ? 'FAIL' : differ.length ? 'diff' : 'ok  '} ${name}: differs in ${differ.length} of ${rows.length}${ex ? ` (${example})` : ''}`);

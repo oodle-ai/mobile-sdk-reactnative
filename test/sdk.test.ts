@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+// @ts-expect-error: a plain JS module of the CI scripts.
+import { describeUnknown, unknownUploadFields } from '../scripts/collector-fields.mjs';
 import { gunzipSync, strFromU8 } from 'fflate';
 
 // --- Fake native module (read by the RN stub's TurboModuleRegistry) ---
@@ -70,9 +72,43 @@ const fakeNative = {
 };
 (globalThis as unknown as { __oodleNative: unknown }).__oodleNative = fakeNative;
 
+// --- the reference SDK's XHR tracking, as far as it touches trace headers ---
+// On send it sets its trace headers with this.setRequestHeader, and does
+// not check for headers that are already set (@datadog/mobile-react-native
+// XHRProxy). A request it traces has a context with a tracing strategy.
+
+const REF_TRACE = '6b0437ba000000006a1afad9bd587e2b';
+const REF_TRACEPARENT = `00-${REF_TRACE}-cae6ce09b5150042-01`;
+const REF_CONTEXT = { tracingAttributes: { tracingStrategy: 'KEEP' } };
+function addReferenceHeaders(xhr: XMLHttpRequest) {
+  if (!(xhr as unknown as { _datadog_xhr?: unknown })._datadog_xhr) return;
+  xhr.setRequestHeader('traceparent', REF_TRACEPARENT);
+  xhr.setRequestHeader('x-datadog-trace-id', '7646066318290124331');
+}
+
+/** The reference SDK set up after Oodle: its tracking wraps Oodle's. Returns the undo. */
+function wrapXhrLikeReference(): () => void {
+  const proto = FakeXHR.prototype as unknown as { open: (...a: unknown[]) => void; send: (b?: unknown) => void };
+  const { open, send } = proto;
+  proto.open = function (this: XMLHttpRequest, ...a: unknown[]) {
+    (this as unknown as { _datadog_xhr?: unknown })._datadog_xhr = REF_CONTEXT;
+    return open.apply(this, a);
+  };
+  proto.send = function (this: XMLHttpRequest, b?: unknown) {
+    addReferenceHeaders(this);
+    return send.call(this, b);
+  };
+  return () => {
+    proto.open = open;
+    proto.send = send;
+  };
+}
+
 // --- Fake XMLHttpRequest for app requests ---
 
 class FakeXHR {
+  /** The reference SDK set up before Oodle: its tracking runs inside Oodle's, as part of the XHR. */
+  static referenceInside = false;
   status = 0;
   responseType = '';
   readyState = 0;
@@ -80,9 +116,12 @@ class FakeXHR {
   private listeners: Array<() => void> = [];
   private abortListeners: Array<() => void> = [];
   onreadystatechange: unknown = null;
-  open(_m: string, _u: string) {}
+  open(_m: string, _u: string) {
+    if (FakeXHR.referenceInside) (this as unknown as { _datadog_xhr?: unknown })._datadog_xhr = REF_CONTEXT;
+  }
+  /** As a real XHR: a header set twice is sent once, with both values ("a, b"). */
   setRequestHeader(k: string, v: string) {
-    this.headers[k] = v;
+    this.headers[k] = this.headers[k] === undefined ? v : `${this.headers[k]}, ${v}`;
   }
   addEventListener(ev: string, fn: () => void) {
     if (ev === 'loadend') this.listeners.push(fn);
@@ -95,14 +134,24 @@ class FakeXHR {
     for (const fn of this.listeners) fn();
     this.listeners = [];
   }
+  response: unknown = null;
+  responseText = '';
+  private get url() {
+    return (this as unknown as { __oodle?: { url: string } }).__oodle?.url ?? '';
+  }
+  /** A URL with "chunked" has no Content-Length, as a chunked or compressed response. */
   getResponseHeader(name: string) {
-    return name === 'content-length' ? '68' : null;
+    return name === 'content-length' && !this.url.includes('chunked') ? '68' : null;
   }
   send() {
-    const url = (this as unknown as { __oodle?: { url: string } }).__oodle?.url ?? '';
+    if (FakeXHR.referenceInside) addReferenceHeaders(this as unknown as XMLHttpRequest);
+    const url = this.url;
     setTimeout(() => {
       this.status = url.includes('down') ? 0 : 200;
       this.readyState = 4;
+      // "{"é":1}" is 7 characters and 8 bytes in UTF-8. React Native's fetch reads a blob.
+      this.responseText = this.responseType === 'blob' ? '' : '{"é":1}';
+      this.response = this.responseType === 'blob' ? { size: 42 } : this.responseText;
       for (const fn of this.listeners) fn();
     }, 5);
   }
@@ -112,18 +161,26 @@ class FakeXHR {
 // --- The app's fetch ---
 // Expo replaces fetch with a native one that does not use XHR. A URL with
 // "polyfill" behaves as React Native's own fetch, which runs on XHR.
-const fetchCalls: Array<{ url: string; headers: Record<string, string> }> = [];
+const fetchCalls: Array<{ url: string; headers: Record<string, string>; xhr?: FakeXHR }> = [];
 const fakeFetch = vi.fn((input: unknown, init?: { headers?: Record<string, string> }) => {
   const url = String(input);
-  fetchCalls.push({ url, headers: { ...(init?.headers ?? {}) } });
+  const call: (typeof fetchCalls)[number] = { url, headers: { ...(init?.headers ?? {}) } };
+  fetchCalls.push(call);
   if (url.includes('cancelled')) {
     return Promise.reject(Object.assign(new Error('Aborted'), { name: 'AbortError' }));
   }
   if (url.includes('polyfill')) {
     const xhr = new (globalThis as unknown as { XMLHttpRequest: new () => XMLHttpRequest }).XMLHttpRequest();
+    call.xhr = xhr as unknown as FakeXHR;
     xhr.open('GET', url);
+    // As whatwg-fetch: the request headers go on the XHR.
+    for (const [k, v] of Object.entries(init?.headers ?? {})) xhr.setRequestHeader(k, v);
+    xhr.responseType = 'blob';
+    const length = url.includes('chunked') ? null : '7';
     return new Promise((resolve) => {
-      xhr.addEventListener('loadend', () => resolve({ status: 200, headers: { get: () => '7' } }));
+      xhr.addEventListener('loadend', () =>
+        resolve({ status: 200, headers: { get: (n: string) => (n === 'content-length' ? length : null) } }),
+      );
       xhr.send();
     });
   }
@@ -148,7 +205,12 @@ let globalHandler: GlobalHandler = rnDefaultHandler;
 
 // --- Captured uploads ---
 
-type Envelope = { header: Record<string, unknown>; sections: Record<string, Array<Record<string, unknown>>> };
+type Envelope = {
+  header: Record<string, unknown>;
+  /** The section lines ({ type, count }), in order. */
+  heads: Array<Record<string, unknown>>;
+  sections: Record<string, Array<Record<string, unknown>>>;
+};
 const uploads: Envelope[] = [];
 /** Every upload of the run; `uploads` is cleared before each test. */
 const history: Envelope[] = [];
@@ -156,9 +218,13 @@ const history: Envelope[] = [];
 function decode(body: Uint8Array | string): Envelope {
   const text = typeof body === 'string' ? body : strFromU8(gunzipSync(body));
   const lines = text.split('\n').map((l) => JSON.parse(l));
+  const heads: Envelope['heads'] = [];
   const sections: Envelope['sections'] = {};
-  for (let i = 1; i < lines.length; i += 2) sections[lines[i].type] = lines[i + 1];
-  return { header: lines[0], sections };
+  for (let i = 1; i < lines.length; i += 2) {
+    heads.push(lines[i]);
+    sections[lines[i].type] = lines[i + 1];
+  }
+  return { header: lines[0], heads, sections };
 }
 
 function all(type: string): Array<Record<string, unknown>> {
@@ -361,6 +427,9 @@ describe('OodleRum end to end', () => {
     const plain = new FakeXHR() as unknown as XMLHttpRequest;
     plain.open('GET', 'https://cdn.other.test/down.png');
     plain.send();
+    const chunked = new FakeXHR() as unknown as XMLHttpRequest;
+    chunked.open('GET', 'https://cdn.other.test/chunked.json');
+    chunked.send();
     await settle();
     const headers = (xhr as unknown as FakeXHR).headers;
     expect(headers.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
@@ -369,10 +438,17 @@ describe('OodleRum end to end', () => {
     const res = events('resource');
     const traced = res.find((r) => String(r.url_full).includes('sync.snapshot'))!;
     expect(traced).toMatchObject({
-      url_full: 'https://api.fieldwork.test/api/trpc/sync.snapshot',
+      // The URL keeps its query string, as in other mobile RUM SDKs.
+      url_full: 'https://api.fieldwork.test/api/trpc/sync.snapshot?batch=1',
       http_request_method: 'POST',
       http_response_status_code: 200,
       http_response_body_size: 68,
+      resource_type: 'xhr',
+    });
+    // Without Content-Length, the size is the body that the XHR read, in bytes.
+    expect(res.find((r) => String(r.url_full).includes('chunked.json'))).toMatchObject({
+      http_response_body_size: 8,
+      resource_type: 'xhr',
     });
     expect(traced.trace_id).toBe(headers.traceparent.split('-')[1]);
     expect(events('error').find((e) => e.error_source === 'network')).toBeDefined();
@@ -391,20 +467,32 @@ describe('OodleRum end to end', () => {
     expect(sent.headers.traceparent).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
     // React Native's own fetch runs on XHR: still one resource.
     const polyfill = appFetch('https://cdn.other.test/polyfill.json');
+    const chunked = appFetch('https://cdn.other.test/polyfill-chunked.json');
     await vi.advanceTimersByTimeAsync(10);
-    await polyfill;
+    await Promise.all([polyfill, chunked]);
     await settle();
     const resources = events('resource');
     const call = resources.find((r) => String(r.url_full).includes('workflow.execute'))!;
     expect(call).toMatchObject({
-      url_full: 'https://api.fieldwork.test/api/trpc/workflow.execute',
+      url_full: 'https://api.fieldwork.test/api/trpc/workflow.execute?batch=1',
       http_request_method: 'POST',
       http_response_status_code: 201,
       http_response_body_size: 12,
       resource_type: 'fetch',
     });
     expect(call.trace_id).toBe(sent.headers.traceparent.split('-')[1]);
-    expect(resources.filter((r) => String(r.url_full).includes('polyfill'))).toHaveLength(1);
+    // As in the reference SDK, a fetch that runs on XHR is an xhr resource.
+    // Without Content-Length, its size is the blob that the XHR read.
+    const onXhr = resources.filter((r) => String(r.url_full).includes('polyfill'));
+    expect(onXhr).toHaveLength(2);
+    expect(onXhr.find((r) => r.url_full === 'https://cdn.other.test/polyfill.json')).toMatchObject({
+      resource_type: 'xhr',
+      http_response_body_size: 7,
+    });
+    expect(onXhr.find((r) => String(r.url_full).includes('polyfill-chunked'))).toMatchObject({
+      resource_type: 'xhr',
+      http_response_body_size: 42,
+    });
   });
 
   // An app cancels requests on purpose (a screen closes, a search
@@ -436,6 +524,67 @@ describe('OodleRum end to end', () => {
     expect((xhr as unknown as FakeXHR).headers.traceparent).toBe(parent);
     const res = events('resource').find((r) => String(r.url_full).endsWith('/api/orders'))!;
     expect(res).toMatchObject({ trace_id: '4bf92f3577b34da6a3ce929d0e0e4736', span_id: '00f067aa0ba902b7' });
+  });
+
+  // The reference SDK's XHR tracking adds its trace headers without a check. With
+  // both SDKs, a request must still carry one traceparent, and both SDKs
+  // must link the same backend trace.
+  it('adds no second trace headers to an XHR that the reference SDK traces, in either setup order', async () => {
+    FakeXHR.referenceInside = true;
+    const inside = new FakeXHR() as unknown as XMLHttpRequest;
+    inside.open('GET', 'https://api.fieldwork.test/api/ref-inside');
+    inside.send();
+    FakeXHR.referenceInside = false;
+    const undo = wrapXhrLikeReference();
+    const around = new FakeXHR() as unknown as XMLHttpRequest;
+    try {
+      around.open('GET', 'https://api.fieldwork.test/api/ref-around');
+      around.send();
+    } finally {
+      undo();
+    }
+    await settle();
+    for (const [xhr, name] of [
+      [inside, 'ref-inside'],
+      [around, 'ref-around'],
+    ] as const) {
+      const headers = (xhr as unknown as FakeXHR).headers;
+      expect(headers.traceparent).toBe(REF_TRACEPARENT);
+      expect(headers['x-datadog-trace-id']).toBe('7646066318290124331');
+      const res = events('resource').find((r) => String(r.url_full).endsWith(`/api/${name}`));
+      expect(res).toMatchObject({ trace_id: REF_TRACE, span_id: 'cae6ce09b5150042' });
+    }
+  });
+
+  it('traces a fetch that runs on XHR on its XHR, so it has one traceparent, with the reference SDK too', async () => {
+    const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    // React Native's own fetch (whatwg-fetch) marks itself.
+    (fakeFetch as unknown as { polyfill?: boolean }).polyfill = true;
+    try {
+      const alone = appFetch('https://api.fieldwork.test/api/polyfill-alone.json');
+      FakeXHR.referenceInside = true;
+      const withReference = appFetch('https://api.fieldwork.test/api/polyfill-reference.json');
+      FakeXHR.referenceInside = false;
+      await vi.advanceTimersByTimeAsync(10);
+      await Promise.all([alone, withReference]);
+    } finally {
+      delete (fakeFetch as unknown as { polyfill?: boolean }).polyfill;
+      FakeXHR.referenceInside = false;
+    }
+    await settle();
+    const call = (name: string) => fetchCalls.find((c) => c.url.includes(name))!;
+    const resource = (name: string) => events('resource').find((r) => String(r.url_full).includes(name))!;
+
+    // Alone: the trace headers go on the XHR, not in the fetch call.
+    expect(call('polyfill-alone').headers.traceparent).toBeUndefined();
+    const own = call('polyfill-alone').xhr!.headers.traceparent;
+    expect(own).toMatch(/^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/);
+    expect(resource('polyfill-alone')).toMatchObject({ resource_type: 'xhr', trace_id: own.split('-')[1] });
+
+    // With the reference SDK: only the reference SDK's headers, and Oodle records its trace.
+    expect(call('polyfill-reference').headers.traceparent).toBeUndefined();
+    expect(call('polyfill-reference').xhr!.headers.traceparent).toBe(REF_TRACEPARENT);
+    expect(resource('polyfill-reference')).toMatchObject({ resource_type: 'xhr', trace_id: REF_TRACE });
   });
 
   it('records handled errors, custom actions, operations and timings', async () => {
@@ -767,5 +916,21 @@ describe('OodleRum end to end', () => {
     errors.reportPendingCrash();
     await settle();
     expect(events('error').filter((e) => e.exception_type === 'SIGABRT')).toHaveLength(1);
+  });
+});
+
+// Runs after the tests above, on every upload that they caused.
+describe('the uploads of this run', () => {
+  it('have only fields that the collector stores (scripts/collector-fields.json)', () => {
+    expect(history.length).toBeGreaterThan(0);
+    const dropped = history.map((u) =>
+      describeUnknown(
+        unknownUploadFields(
+          u.header,
+          u.heads.map((head) => ({ type: head.type, head, items: u.sections[String(head.type)] ?? [] })),
+        ),
+      ),
+    );
+    expect(dropped.filter(Boolean)).toEqual([]);
   });
 });

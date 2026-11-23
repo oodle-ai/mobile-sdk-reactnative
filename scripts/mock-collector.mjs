@@ -6,7 +6,10 @@
 //   <out>/replay/<session>/seg-NNNNNN one replay segment per file (rrweb events)
 //   <out>/requests.ndjson             one line per upload of either SDK: its
 //                                     bytes on the wire, events, segments and
-//                                     delivery lag (scripts/compare/ reads it)
+//                                     delivery lag (scripts/compare/ reads it),
+//                                     and for Oodle the fields that the
+//                                     collector does not store (unknown_fields,
+//                                     collector-fields.json; scripts/ci/ fails on them)
 // The Fieldwork fixture also sends its reference SDK data here:
 //   /reference/rum     <out>/reference.ndjson         one upload per line, tagged with
 //                                                 the scenario
@@ -14,7 +17,9 @@
 //   /reference/replay  <out>/reference-replay.ndjson  one Session Replay segment per line
 // With --api-port it also serves a stand-in app API that answers every
 // request with an empty JSON list. It has its own port, because the SDK
-// does not record requests to the collector itself.
+// does not record requests to the collector itself. It writes each request
+// that it got to <out>/api-requests.ndjson, with the scenario and each
+// traceparent value: what the app really sent, for scripts/compare/.
 //
 // For the CI scenarios (scripts/ci/scenarios.sh, scripts/compare/) it is
 // also the control channel of the fixture app:
@@ -27,6 +32,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { describeUnknown, unknownUploadFields } from './collector-fields.mjs';
 import { decompress, parseReferenceReplay, parseReferenceRum, parseEnvelope } from './intake.mjs';
 
 const args = process.argv.slice(2);
@@ -130,6 +136,12 @@ async function handleIngest(req, res) {
     return;
   }
   if (batchId) seenBatches.add(batchId);
+  // The collector drops a field that its schema does not name. Here the
+  // upload is stored as it is, and the fields are recorded for the checks.
+  const unknown = unknownUploadFields(header, sections);
+  if (Object.keys(unknown).length) {
+    console.log(`${new Date().toISOString()} fields the collector does not store: ${describeUnknown(unknown)}`);
+  }
   const summary = [];
   let eventCount = 0;
   let segmentCount = 0;
@@ -166,6 +178,7 @@ async function handleIngest(req, res) {
     events: eventCount,
     segments: segmentCount,
     lags_ms: lags(eventTimes, now),
+    ...(Object.keys(unknown).length ? { unknown_fields: unknown } : {}),
   });
   console.log(`${new Date().toISOString()} sdk=${header.sdk_version} batch ${String(batchId ?? '-').slice(0, 8)} ${summary.join('; ')}`);
   res.writeHead(202).end();
@@ -207,8 +220,24 @@ server.listen(port, host, () => console.log(`mock collector on http://${host}:${
 
 const apiPort = opt('api-port', '');
 if (apiPort) {
+  const apiFile = path.join(out, 'api-requests.ndjson');
   const api = http.createServer((req, res) => {
     console.log(`api ${req.method} ${req.url} traceparent=${req.headers.traceparent ?? '-'}`);
+    // Two SDKs that both set the header give one line with two values
+    // ("a, b"), or two lines; both count as two values.
+    const traceparents = (req.headersDistinct?.traceparent ?? [])
+      .flatMap((v) => v.split(','))
+      .map((v) => v.trim())
+      .filter(Boolean);
+    appendLines(apiFile, [
+      {
+        received_ms: Date.now(),
+        scenario: scenario.name,
+        method: req.method,
+        path: (req.url ?? '').replace(/\?.*$/, ''),
+        traceparents,
+      },
+    ]);
     res.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
   });
   api.keepAliveTimeout = server.keepAliveTimeout;

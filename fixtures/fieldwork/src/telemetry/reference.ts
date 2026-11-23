@@ -19,9 +19,28 @@ import {
 import { apiHost, collectorUrl, referenceConfig } from '../config';
 import type { Telemetry } from './types';
 
+// With both SDKs on, the reference SDK's XHR tracking also sees the Oodle SDK's
+// uploads. They are SDK traffic, not app requests, and the Fieldwork One
+// demo drops them the same way. Failed uploads have no responseURL, so the
+// SDK's own request flag is checked too.
+const isOodleUpload = (xhr: XMLHttpRequest | undefined) =>
+  !!xhr &&
+  (!!(xhr as unknown as Record<string, unknown>).__oodleInternalRequest ||
+    !!xhr.responseURL?.startsWith(collectorUrl));
+
 let enabled = false;
 let replayEnabled = false;
 let currentView: string | undefined;
+let verbosity = SdkVerbosity.WARN;
+
+/**
+ * Starts the reference SDK with its debug log on the next initialize(). The native
+ * SDKs then write what they record and upload to the device log (logcat
+ * on Android), which shows why the reference SDK sends nothing.
+ */
+export function setReferenceDebug(on: boolean) {
+  verbosity = on ? SdkVerbosity.DEBUG : SdkVerbosity.WARN;
+}
 let transitions: Promise<unknown> = Promise.resolve();
 const quietly = (p: Promise<unknown>) => void p.catch(() => undefined);
 
@@ -38,7 +57,7 @@ export const reference: Telemetry = {
         site: referenceConfig.site,
         service: 'fieldwork-one-mobile',
         version: '1.0.0',
-        verbosity: SdkVerbosity.WARN,
+        verbosity,
         // Small, frequent uploads to the mock collector let the CI
         // scenarios check that the reference SDK also reported a crash, while the
         // Oodle SDK was installed next to it.
@@ -53,6 +72,7 @@ export const reference: Telemetry = {
           trackInteractions: true,
           useAccessibilityLabel: true,
           trackResources: true,
+          resourceEventMapper: (event) => (isOodleUpload(event.resourceContext) ? null : event),
           trackErrors: true,
           firstPartyHosts: [
             { match: apiHost, propagatorTypes: [PropagatorType.DATADOG, PropagatorType.TRACECONTEXT] },

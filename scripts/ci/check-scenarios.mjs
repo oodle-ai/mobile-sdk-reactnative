@@ -14,7 +14,7 @@
 // Usage: check-scenarios.mjs --out <collector dir> --platform android|ios
 import fs from 'node:fs';
 import path from 'node:path';
-import { check, finish, opt, outDir, readNdjson } from './collector-lib.mjs';
+import { check, checkCollectorFields, finish, opt, outDir, readNdjson } from './collector-lib.mjs';
 
 const out = outDir();
 const platform = opt('platform', 'android');
@@ -78,5 +78,7 @@ if (ran.includes('offline')) {
 const uids = events.map((e) => e.log_record_uid);
 const duplicates = uids.length - new Set(uids).size;
 check(duplicates === 0, `no event arrived twice (${duplicates} duplicates)`);
+// The crash and ANR events of the scenarios have fields of their own.
+checkCollectorFields(out);
 
 finish('scenario check');

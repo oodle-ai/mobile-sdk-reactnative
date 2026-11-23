@@ -24,6 +24,27 @@ export function readNdjson(file) {
     .map((l) => JSON.parse(l));
 }
 
+/**
+ * Checks that the SDK sent only fields that the collector stores
+ * (scripts/collector-fields.json). The mock collector records the other
+ * fields of each upload in requests.ndjson.
+ */
+export function checkCollectorFields(out) {
+  const found = {};
+  for (const r of readNdjson(path.join(out, 'requests.ndjson'))) {
+    for (const [part, fields] of Object.entries(r.unknown_fields ?? {})) {
+      for (const [f, n] of Object.entries(fields)) found[`${part}.${f}`] = (found[`${part}.${f}`] ?? 0) + n;
+    }
+  }
+  const list = Object.entries(found).map(([f, n]) => `${f} (${n})`);
+  check(
+    list.length === 0,
+    list.length
+      ? `every field is in scripts/collector-fields.json; the collector drops: ${list.join(', ')}`
+      : 'every field is in scripts/collector-fields.json',
+  );
+}
+
 const failures = [];
 
 /** Prints one result line and remembers a failure for `finish()`. */

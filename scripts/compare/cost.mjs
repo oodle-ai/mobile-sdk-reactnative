@@ -109,6 +109,16 @@ for (const r of rows) {
     `| ${r.replay} | ${sdk} | ${r.launches} | ${withDelta(r, 'cpu_ms')} | ${withDelta(r, 'mem_kb')} | ${withDelta(r, 'start_ms')} | ${withDelta(r, 'janky', 1)} | ${network.join(' | ')} |`,
   );
 }
+// An SDK that sent no replay in launches with replay on did no replay
+// work, so its numbers there are not comparable with the other SDK's.
+for (const r of rows) {
+  if (r.provider !== 'none' && r.replay === 'on' && !r.replay_kb) {
+    lines.push(
+      '',
+      `**${r.provider} sent no replay with replay on**, so its CPU, memory and bytes in that row leave out replay work: they are lower than in an app where its replay records.`,
+    );
+  }
+}
 lines.push(
   '',
   platform === 'ios'

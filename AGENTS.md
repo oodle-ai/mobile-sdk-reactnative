@@ -18,7 +18,9 @@ rules, or sessions and views are counted wrong:
   `view_is_new: 1`, the last `view_is_active: 0`. Unsent updates of one
   view collapse in the queue, and the merge keeps both flags.
 - A field the collector schema does not name is dropped at ingest. A
-  new field needs a matching change in the collector first.
+  new field needs a matching change in the collector first, then an
+  entry in `scripts/collector-fields.json`. `pnpm test` and the device
+  checks fail on a field that is not in that list.
 - Field names follow the OpenTelemetry semantic conventions wherever one
   exists, with `_` for `.` (`exception.type` is `exception_type`,
   `url.full` is `url_full`), and use the OpenTelemetry values
@@ -175,7 +177,13 @@ and replay, so one build serves every run.
 - Parity: both SDKs on the same launches; `parity.mjs` fails on a
   difference that `parity-allowlist.json` does not explain. Where the
   two differ, one is wrong. The reference SDK's behavior is what
-  customers who move from it expect.
+  customers who move from it expect, so where it is not clear which one
+  is right, the SDK does what the reference SDK does. Find out first what
+  it does from the data of a run, not from its documentation. The
+  reference SDK is not always right: it loses the last view updates of an
+  app that is ended in the background, and it reports long tasks on iOS
+  while the app is in the background, where the JS thread is paused, not
+  blocked.
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device; `cost.mjs` reports CPU, memory, start time, frames, bytes
   and requests against the launches with no SDK. Every measure comes from outside the
@@ -186,7 +194,8 @@ This repo is public. Do not name other vendors or their products in
 files, branch names or commit messages: call the SDK that the comparison
 runs "the reference SDK", and other SDKs "other mobile RUM SDKs". Only
 identifiers that code needs keep a vendor name: a trace propagator
-option and its header names, npm package names, and the field names of a
-payload format that the code reads.
+option and its header names, npm package names, and the field and
+property names that the code reads (a payload format, the context that
+the reference SDK puts on an XHR).
 
 Write new prose and comments in Simplified Technical English.
