@@ -88,6 +88,12 @@ export interface OodleRumConfig {
   allowedTracingUrls?: Array<UrlMatcher | TracingUrl>;
   /** Percentage of traced requests marked as sampled. Default 100. */
   traceSampleRate?: number;
+  /**
+   * Send a client span (OpenTelemetry, kind client) for each sampled
+   * request that gets trace headers, so the app is a service in Oodle
+   * APM, the parent of its backend's spans. Default true.
+   */
+  sendClientSpans?: boolean;
 
   /** Native crash capture. Default true. */
   nativeCrashReporting?: boolean;
@@ -142,6 +148,7 @@ export interface ResolvedConfig {
   trackConsole: boolean;
   tracingUrls: ResolvedTracingUrl[];
   traceSampleRate: number;
+  sendClientSpans: boolean;
   nativeCrashReporting: boolean;
   trackAnrs: boolean;
   anrThresholdMs: number;
@@ -302,6 +309,7 @@ export function resolveConfig(
     trackConsole: input.trackConsole !== false,
     tracingUrls: resolveTracing(input.allowedTracingUrls),
     traceSampleRate: rate(input.traceSampleRate, 100),
+    sendClientSpans: input.sendClientSpans !== false,
     nativeCrashReporting: input.nativeCrashReporting !== false,
     trackAnrs: input.trackAnrs !== false,
     // Native code turns the threshold into an integer, which traps on

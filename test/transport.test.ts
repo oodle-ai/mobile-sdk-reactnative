@@ -18,6 +18,7 @@ import {
   retryDelayMs,
   setCanSend,
   setPoster,
+  SPANS_BATCH_KEY,
   upsert,
   type PostResult,
 } from '../src/core/transport';
@@ -245,6 +246,41 @@ describe('transport', () => {
     restart();
     restoreOutbox();
     await vi.runAllTimersAsync();
+    expect(accepted[0].headers[BATCH_ID_HEADER]).toBe(id);
+  });
+
+  it('sends client spans in an OTLP body of their own to the trace path', async () => {
+    const span = { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16), name: 'GET', kind: 3 };
+    enqueue('events', { n: 1 });
+    enqueue(SPANS_BATCH_KEY, { resource: { 'service.name': 'app' }, span });
+    flush();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(sent.map((s) => s.url)).toEqual(['https://c.oodle.ai/v1/rum/ingest', 'https://c.oodle.ai/v1/rum/traces']);
+    // The envelope has no spans section.
+    expect(sent[0].lines.filter((l) => (l as { type?: string }).type === SPANS_BATCH_KEY)).toEqual([]);
+    expect(sent[1].lines).toEqual([
+      {
+        resourceSpans: [
+          {
+            resource: { attributes: [{ key: 'service.name', value: { stringValue: 'app' } }] },
+            scopeSpans: [{ scope: { name: '@oodle-ai/mobile-sdk-reactnative', version: expect.any(String) }, spans: [span] }],
+          },
+        ],
+      },
+    ]);
+    expect(sent[1].headers[BATCH_ID_HEADER]).not.toBe(sent[0].headers[BATCH_ID_HEADER]);
+  });
+
+  it('keeps the path of a span body in the outbox', async () => {
+    slowPosterFor();
+    enqueue(SPANS_BATCH_KEY, { resource: {}, span: { traceId: 'a'.repeat(32), spanId: 'b'.repeat(16) } });
+    flush();
+    persistOutbox();
+    const id = (JSON.parse(storage.get('outbox')!) as { retry: Array<{ id: string }> }).retry[0].id;
+    restart();
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(accepted.map((s) => s.url)).toEqual(['https://c.oodle.ai/v1/rum/traces']);
     expect(accepted[0].headers[BATCH_ID_HEADER]).toBe(id);
   });
 

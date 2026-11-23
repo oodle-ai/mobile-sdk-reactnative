@@ -2,13 +2,20 @@ import { getConfig } from '../core/config';
 import { INTERNAL_REQUEST } from '../core/internal';
 import { newTraceIds, tracingHeaders } from '../core/tracing';
 import { emit } from './emit';
+import { recordClientSpan } from './spans';
 
 interface Trace {
   traceId: string;
   spanId: string;
+  /**
+   * True when this SDK, or the reference SDK, started the trace: the request
+   * then gets a client span (recordClientSpan). A traceparent that the
+   * app set comes from its own tracer, which sends that span.
+   */
+  client: boolean;
 }
 
-const NO_TRACE: Trace = { traceId: '', spanId: '' };
+const NO_TRACE: Trace = { traceId: '', spanId: '', client: false };
 
 interface TrackedXHR {
   [INTERNAL_REQUEST]?: boolean;
@@ -71,10 +78,14 @@ function referenceTraces(xhr: TrackedXHR): boolean {
   return typeof strategy === 'string' && strategy !== 'DISCARD';
 }
 
-/** The trace of the traceparent that a request carries, when it is sampled. */
+/**
+ * The trace of the traceparent that the reference SDK set, when it is sampled.
+ * The reference SDK sends its client span to its own backend, so Oodle sends
+ * one with the same ids.
+ */
 function traceOf(headers: Map<string, string>): Trace {
   const parent = parseTraceparent(headers.get('traceparent') ?? '');
-  return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId } : NO_TRACE;
+  return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId, client: true } : NO_TRACE;
 }
 
 function now(): number {
@@ -226,7 +237,7 @@ export function installResourceTracking() {
       reported = true;
       const status = this.status || 0;
       const duration = Math.round(now() - start);
-      emitResource(info.method, info.url, status, duration, xhrResponseSize(this), 'xhr', trace.traceId, trace.spanId, aborted);
+      emitResource(info.method, info.url, status, duration, xhrResponseSize(this), 'xhr', trace, aborted);
     };
     try {
       this.addEventListener('abort', () => {
@@ -255,20 +266,20 @@ function traceRequest(
   url: string,
   headers: Map<string, string>,
   setHeader: (name: string, value: string) => void,
-): { traceId: string; spanId: string } {
+): Trace {
   const config = getConfig();
   const existing = headers.get('traceparent');
   if (existing !== undefined) {
     const parent = parseTraceparent(existing);
-    return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId } : { traceId: '', spanId: '' };
+    return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId, client: false } : NO_TRACE;
   }
   const rule = config?.tracingUrls.find((r) => r.test(url));
-  if (!config || !rule) return { traceId: '', spanId: '' };
+  if (!config || !rule) return NO_TRACE;
   const ids = newTraceIds(config.traceSampleRate);
   for (const [k, v] of Object.entries(tracingHeaders(ids, rule.propagators))) {
     if (!headers.has(k)) setHeader(k, v);
   }
-  return ids.sampled ? { traceId: ids.traceId, spanId: ids.spanId } : { traceId: '', spanId: '' };
+  return ids.sampled ? { traceId: ids.traceId, spanId: ids.spanId, client: true } : NO_TRACE;
 }
 
 function emitResource(
@@ -278,8 +289,7 @@ function emitResource(
   duration: number,
   size: number,
   type: string,
-  traceId: string,
-  spanId: string,
+  trace: Trace,
   aborted = false,
 ) {
   const data: Record<string, unknown> = {
@@ -293,13 +303,24 @@ function emitResource(
     http_response_body_size: size,
     resource_type: type,
   };
-  if (traceId) {
-    data.trace_id = traceId;
-    data.span_id = spanId;
+  if (trace.traceId) {
+    data.trace_id = trace.traceId;
+    data.span_id = trace.spanId;
   }
   // A request is not user activity: an app that polls would keep its
   // session open, or start a new one, with nobody using it.
   emit(data, false);
+  if (trace.client) {
+    recordClientSpan({
+      traceId: trace.traceId,
+      spanId: trace.spanId,
+      method,
+      url,
+      status,
+      durationMs: duration,
+      aborted,
+    });
+  }
   // A request the app cancelled did not fail: it is not a network error.
   if (status === 0 && !aborted) {
     emit(
@@ -408,7 +429,7 @@ function installFetchTracking() {
     } catch (e) {
       xhr = fetchXhr;
       const t = (xhr as TrackedXHR | null)?.__oodleTrace ?? fetchTrace;
-      emitResource(method, url, 0, Math.round(now() - start), 0, xhr ? 'xhr' : 'fetch', t.traceId, t.spanId);
+      emitResource(method, url, 0, Math.round(now() - start), 0, xhr ? 'xhr' : 'fetch', t);
       throw e;
     } finally {
       fetchXhr = null;
@@ -426,11 +447,11 @@ function installFetchTracking() {
           // a response without readable headers
         }
         if (!size && xhr) size = xhrResponseSize(xhr);
-        emitResource(method, url, res?.status ?? 0, Math.round(now() - start), size, type, trace().traceId, trace().spanId);
+        emitResource(method, url, res?.status ?? 0, Math.round(now() - start), size, type, trace());
         return res;
       },
       (err: unknown) => {
-        emitResource(method, url, 0, Math.round(now() - start), 0, type, trace().traceId, trace().spanId, isAbort(err, args));
+        emitResource(method, url, 0, Math.round(now() - start), 0, type, trace(), isAbort(err, args));
         throw err;
       },
     );

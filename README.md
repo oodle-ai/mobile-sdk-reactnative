@@ -106,6 +106,7 @@ OodleSessionReplay.start() / .stop() / .isRecording()
 | `trackConsole` | `true` | `console.error` and `console.warn` |
 | `allowedTracingUrls` | `[]` | Hosts, URL prefixes, RegExps or functions; `{ match, propagators }` picks `tracecontext`, `b3`, `b3multi`, `datadog`. A URL prefix matches where a host or path part ends: `https://api.example.com` does not match `https://api.example.com.evil.net` |
 | `traceSampleRate` | `100` | Percentage of traced requests marked as sampled |
+| `sendClientSpans` | `true` | A client span to Oodle APM for each sampled request that gets trace headers. See [Traces](#traces) |
 | `nativeCrashReporting` | `true` | JVM exceptions (Android), NSExceptions and fatal signals (iOS) |
 | `trackAnrs` / `anrThresholdMs` | `true` / 5000 Android, 2000 iOS | Main thread watchdog |
 | `longTaskThresholdMs` | `200` | JS thread block that counts as a long task, or `false` |
@@ -126,6 +127,38 @@ beforeSend: (event) => {
   return event;
 },
 ```
+
+## Traces
+
+A request to a host in `allowedTracingUrls` gets trace headers, and its
+resource event records the trace (`trace_id`, `span_id`). With the
+backend traced too (with OpenTelemetry for `tracecontext`, or a tracer
+that reads the `datadog` headers), the backend's spans join that trace.
+
+For each sampled request, the SDK also sends a client span to the
+collector's trace path (`/v1/rum/traces`, OTLP/JSON), as the browser SDK
+does. The app is then a service in Oodle APM, under its `service` name,
+and its span is the parent of the backend's spans:
+
+- name: the HTTP method; kind: client
+- `http.request.method`, `url.full`, `url.path`, `server.address`,
+  `server.port`, `http.response.status_code`, and `error.type` with an
+  error status when the request failed (4xx, 5xx, or no answer)
+- `session.id`: the RUM session of the request
+- resource: `service.name`, `service.version`,
+  `deployment.environment.name`, `os.name`, `os.version`,
+  `device.manufacturer`, `device.model.identifier`
+
+`url.full` has no query string, fragment or user info: they can hold
+tokens, and `beforeSend` does not see spans.
+
+A request whose `traceparent` the app set itself gets no span: the app's
+own tracer sends it. When another RUM SDK traces a request (see the
+CHANGELOG), Oodle sends a span with that SDK's ids, which sends its own
+span to its own backend.
+
+Spans go through the same queue, retries and outbox as events. Set
+`sendClientSpans: false` to send none.
 
 ## Readable stack traces
 
