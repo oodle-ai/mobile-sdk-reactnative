@@ -24,7 +24,9 @@ export const oodleConfig = {
   env: 'ci',
 };
 
-// Placeholder credentials: the reference SDK starts, and its uploads fail.
+// Placeholder credentials: the reference SDK checks only their form. Its
+// uploads go to the mock collector (customEndpoint in
+// telemetry/reference.ts), which does not check them.
 export const referenceConfig = {
   clientToken: 'pub-fixture-placeholder-token',
   applicationId: '00000000-0000-0000-0000-000000000000',

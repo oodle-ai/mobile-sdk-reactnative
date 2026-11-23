@@ -7,10 +7,10 @@
 //   <out>/requests.ndjson             one line per upload of either SDK: its
 //                                     bytes on the wire, events, segments and
 //                                     delivery lag (scripts/compare/ reads it)
-// The Fieldwork fixture also sends its reference data here:
+// The Fieldwork fixture also sends its reference SDK data here:
 //   /reference/rum     <out>/reference.ndjson         one upload per line, tagged with
 //                                                 the scenario
-//                    <out>/reference-events.ndjson  one reference RUM event per line
+//                    <out>/reference-events.ndjson  one reference SDK RUM event per line
 //   /reference/replay  <out>/reference-replay.ndjson  one Session Replay segment per line
 // With --api-port it also serves a stand-in app API that answers every
 // request with an empty JSON list. It has its own port, because the SDK

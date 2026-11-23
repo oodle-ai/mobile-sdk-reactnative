@@ -80,7 +80,7 @@ const adapters: Record<TelemetryProvider, Telemetry> = { none, oodle, reference,
 const names: Record<TelemetryProvider, string> = {
   none: 'None',
   oodle: 'Oodle RUM',
-  reference: 'reference RUM',
+  reference: 'Reference RUM',
   both: 'Oodle RUM + reference RUM',
 };
 

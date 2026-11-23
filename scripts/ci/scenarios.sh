@@ -109,11 +109,11 @@ crash_run() {
   set_scenario "after-$name" "$order"
   start_app
   wait_for "the Oodle crash report of $name" 60 more_crashes_than "$crashes"
-  # check-scenarios.mjs reports a missing reference crash; do not stop here.
+  # check-scenarios.mjs reports a missing reference SDK crash; do not stop here.
   # A new process opens a new connection, and on the CI macOS runners the
   # system proxy lookup for it can take about 30 s, on top of the upload
   # delay of the reference SDK.
-  wait_for "the reference crash report of $name" 90 reference_crash "after-$name" || true
+  wait_for "the reference SDK crash report of $name" 90 reference_crash "after-$name" || true
   echo "$name" >> "$RAN"
 }
 

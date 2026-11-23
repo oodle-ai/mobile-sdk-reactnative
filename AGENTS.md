@@ -83,10 +83,10 @@ the app makes by itself, long tasks, console lines, native ANR and hang
 records) passes `activity: false`: it does not keep a session open, and
 once the session has ended its events are dropped (`isSessionExpired`).
 `getSession(false)` never starts a session. When it did, an app left open
-on one screen started a new session every 15 minutes, which the reference SDK does
-not.
+on one screen started a new session every 15 minutes, which the reference
+SDK does not.
 
-As in other mobile RUM SDKs, each launch starts a session of its own at its first
+As in the reference SDK, each launch starts a session of its own at its first
 activity, linked to the last one (`session_previous_id`); the crash that
 ended the last run is still reported on its session (`reportPendingCrash`).
 A return to the app goes on with the view it left, with its id and start,
@@ -157,28 +157,36 @@ native change to the app. A scenario that must end the app from outside
 (a signal, `am crash`, a kill) does that in `scenarios.sh`; the app only
 sends `scenario:<name>`, so the checks can find the session. The
 emulator has `hide_error_dialogs` set: the second crash within a minute
-shows a dialog that keeps the process alive. The fixture sends the reference SDK
-data to the mock collector too (over plain HTTP, which the reference
-Android SDK needs `_dd.needsClearTextHttp` for), and each crash check
-also requires a reference crash report. A failed Android run keeps the
-device log in `scenarios-logcat.txt` in the collector artifact. A crash handler that does not pass a
-crash on breaks the other SDK, and that is what customers who move from
-reference run.
+shows a dialog that keeps the process alive. The fixture also runs the
+reference SDK, the SDK that customers move from, and sends its data to
+the mock collector too (over plain HTTP, which its Android SDK accepts
+only with a cleartext setting); each crash check also requires a crash
+report from it. A failed Android run keeps the device log in
+`scenarios-logcat.txt` in the collector artifact. A crash handler that
+does not pass a crash on breaks the other SDK, and that is what
+customers who move from the reference SDK run.
 
-The `Compare with the reference SDK` workflow (`scripts/compare/run.sh`, each day
-and on request) runs the same fixture build with a soak walk
+The `Compare with the reference SDK` workflow (`scripts/compare/run.sh`,
+each day and on request) runs the same fixture build with a soak walk
 (`fixtures/fieldwork/src/soak.ts`) from a seed. The scenario chooses the
-SDKs of each launch (`provider`: `none`, `oodle`, `reference`, `both`) and
-replay, so one build serves every run.
+SDKs of each launch (`provider`: `none`, `oodle`, `reference`, `both`)
+and replay, so one build serves every run.
 
 - Parity: both SDKs on the same launches; `parity.mjs` fails on a
   difference that `parity-allowlist.json` does not explain. Where the
-  two differ, one is wrong. The reference SDK's behavior is what customers who
-  move from it expect.
-- Cost: no SDK, Oodle and the reference SDK in turn, on the same walks and device;
-  `cost.mjs` reports CPU, memory, start time, frames, bytes and requests
-  against the launches with no SDK. Every measure comes from outside the
+  two differ, one is wrong. The reference SDK's behavior is what
+  customers who move from it expect.
+- Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
+  and device; `cost.mjs` reports CPU, memory, start time, frames, bytes
+  and requests against the launches with no SDK. Every measure comes from outside the
   app (`scripts/ci/device.sh`). CI emulators render in software, so
   measure frames and start time on a real device before you quote them.
+
+This repo is public. Do not name other vendors or their products in
+files, branch names or commit messages: call the SDK that the comparison
+runs "the reference SDK", and other SDKs "other mobile RUM SDKs". Only
+identifiers that code needs keep a vendor name: a trace propagator
+option and its header names, npm package names, and the field names of a
+payload format that the code reads.
 
 Write new prose and comments in Simplified Technical English.

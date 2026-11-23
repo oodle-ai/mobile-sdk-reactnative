@@ -25,7 +25,7 @@ let currentView: string | undefined;
 let transitions: Promise<unknown> = Promise.resolve();
 const quietly = (p: Promise<unknown>) => void p.catch(() => undefined);
 
-// The reference adapter of the Fieldwork One demo, trimmed to the calls
+// The reference SDK adapter of the Fieldwork One demo, trimmed to the calls
 // that touch the same app hooks as the Oodle SDK: XHR, the global error
 // handler, crash handlers, session replay and native vitals.
 export const reference: Telemetry = {
@@ -44,7 +44,7 @@ export const reference: Telemetry = {
         // Oodle SDK was installed next to it.
         uploadFrequency: UploadFrequency.FREQUENT,
         batchSize: BatchSize.SMALL,
-        // The mock collector is plain HTTP. The reference Android SDK sends
+        // The mock collector is plain HTTP. On Android, the reference SDK sends
         // only over TLS unless this is set; iOS does not read it.
         additionalConfiguration: { '_dd.needsClearTextHttp': true },
         rumConfiguration: {
@@ -66,7 +66,7 @@ export const reference: Telemetry = {
     );
     await DdSdkReactNative.initialize(config);
     enabled = true;
-    if (!replay) return 'reference enabled without replay';
+    if (!replay) return 'Reference SDK enabled without replay';
     await SessionReplay.enable({
       replaySampleRate: 100,
       // The mock collector measures the replay uploads of both SDKs.
@@ -77,7 +77,7 @@ export const reference: Telemetry = {
       startRecordingImmediately: consent,
     });
     replayEnabled = true;
-    return 'reference enabled';
+    return 'Reference SDK enabled';
   },
   view(key, name) {
     if (!enabled || currentView === key) return;

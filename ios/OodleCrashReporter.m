@@ -65,7 +65,7 @@ static void WriteNumber(int fd, long value)
 /// there cannot start: the crash was lost. The handler runs on this stack
 /// instead (SA_ONSTACK). Each thread needs its own; the main thread and the
 /// thread that installs the handler get one. A thread that already has one
-/// (another crash reporter sets one) keeps it. The size leaves room for the
+/// (another crash reporter can set one) keeps it. The size leaves room for the
 /// handler of a crash reporter that runs after this one.
 static const size_t kSignalStackSize = 256 * 1024;
 

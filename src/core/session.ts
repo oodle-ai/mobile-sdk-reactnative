@@ -60,7 +60,7 @@ function scheduleWrite() {
  * its own at its first activity, as other mobile RUM SDKs do, and that session
  * links to this one (`session_previous_id`). Kept across launches, one
  * session held the crashes of several runs, and its crash-free rate did
- * not match the reference SDK's on the same data. The crash that ended the last run
+ * not match other RUM SDKs on the same data. The crash that ended the last run
  * is still reported on its own session, from the saved context
  * (`reportPendingCrash`).
  */
@@ -134,7 +134,7 @@ function renew(now: number): SessionData {
  * Background work (view refreshes, replay, requests the app makes by
  * itself) gets the ended session and must drop its event
  * (`isSessionExpired`): an app left open on one screen would otherwise
- * start a new session every SESSION_TIMEOUT_MS, as the reference SDK does not.
+ * start a new session every SESSION_TIMEOUT_MS, which other RUM SDKs do not.
  */
 export function getSession(activity = true): SessionData {
   const now = Date.now();

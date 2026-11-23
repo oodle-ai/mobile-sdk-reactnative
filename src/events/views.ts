@@ -51,7 +51,7 @@ interface ActiveView extends ViewInfo {
 let active: ActiveView | null = null;
 /**
  * The view the app left when it went to the background. It goes on when
- * the app returns (`resumeViews`), as one view, as the reference SDK counts it.
+ * the app returns (`resumeViews`), as one view, as other RUM SDKs count it.
  */
 let paused: ActiveView | null = null;
 let refreshTimer: ReturnType<typeof setInterval> | null = null;
@@ -126,7 +126,7 @@ function round(n: number, digits: number): number {
 
 /**
  * Time since the view started, the time in the background included, as
- * The reference SDK counts it for a view the app returns to.
+ * other RUM SDKs count it for a view the app returns to.
  */
 function timeSpentMs(v: ActiveView, now: number): number {
   return Math.max(0, now - v.startMs);
@@ -358,7 +358,7 @@ export function pauseViews() {
 
 /**
  * The app is back: the view it left goes on, with its id and start, as
- * The reference SDK does. When the session ended while the app was away, a new view
+ * other RUM SDKs do. When the session ended while the app was away, a new view
  * starts, which starts the new session.
  */
 export function resumeViews() {
