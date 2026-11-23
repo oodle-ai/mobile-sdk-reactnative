@@ -223,7 +223,8 @@ beforeAll(async () => {
     allowedTracingUrls: [{ match: 'api.fieldwork.test', propagators: ['tracecontext', 'datadog'] }],
     // The default records a replay for only a sample of sessions. The
     // replay tests below need this session to record one.
-    sessionReplay: { sampleRate: 100 },
+    // The default is mask-all; these tests read replay text and tap labels.
+    sessionReplay: { sampleRate: 100, textAndInputPrivacy: 'mask-all-inputs' },
   });
   expect(ok).toBe(true);
 });

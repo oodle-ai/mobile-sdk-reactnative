@@ -35,7 +35,11 @@ export interface SessionReplayConfig {
    * all features, so the default records only a sample of sessions.
    */
   sampleRate?: number;
-  /** Default `'mask-all-inputs'`. */
+  /**
+   * Default `'mask-all'`, as Datadog's mobile SDKs: no text of the app is
+   * recorded unless the app allows it (`OodlePrivacy level="allow"`, or a
+   * lower level here). It also keeps text out of tap action names.
+   */
   textAndInputPrivacy?: TextAndInputPrivacy;
   /** Images are recorded as placeholders. Default `'mask-all'`. */
   imagePrivacy?: ImagePrivacy;
@@ -321,9 +325,9 @@ export function resolveConfig(
       sampleRate: rate(replayObj.sampleRate, DEFAULT_REPLAY_SAMPLE_RATE),
       textAndInputPrivacy:
         replayObj.textAndInputPrivacy === 'mask-sensitive-inputs' ||
-        replayObj.textAndInputPrivacy === 'mask-all'
+        replayObj.textAndInputPrivacy === 'mask-all-inputs'
           ? replayObj.textAndInputPrivacy
-          : 'mask-all-inputs',
+          : 'mask-all',
       imagePrivacy: 'mask-all',
       touchPrivacy: replayObj.touchPrivacy === 'hide' ? 'hide' : 'show',
       startRecordingImmediately: replayObj.startRecordingImmediately !== false,

@@ -150,9 +150,10 @@ Native code walks the view tree and describes each view as a wireframe
 positioned element per view, a full snapshot first and mutations after
 it. The Oodle replay player plays them as it plays browser sessions.
 
-- `textAndInputPrivacy`: `'mask-sensitive-inputs'`, `'mask-all-inputs'`
-  (default) or `'mask-all'`. Passwords, emails and phone numbers are
-  masked at every level.
+- `textAndInputPrivacy`: `'mask-all'` (default), `'mask-all-inputs'` or
+  `'mask-sensitive-inputs'`. Under `'mask-all'` no text of the app is
+  recorded; wrap a subtree in `<OodlePrivacy level="allow">` to show its
+  text. Passwords, emails and phone numbers are masked at every level.
 - Images are recorded as gray boxes.
 - `<OodlePrivacy level="hidden" | "mask" | "allow">` sets the privacy of
   one subtree.

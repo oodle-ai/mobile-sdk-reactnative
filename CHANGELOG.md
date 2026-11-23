@@ -20,6 +20,12 @@
 
 ### Privacy
 
+- The default `textAndInputPrivacy` is now `'mask-all'`, as in Datadog's
+  mobile SDKs (was `'mask-all-inputs'`). Replays show no text of the app
+  unless the app allows it. Tap actions then have no text label either:
+  a tap is named by its `oodle-action-name` prop, or else by its component
+  (`Pressable`). To keep the 0.1.3 behavior, set
+  `sessionReplay: { textAndInputPrivacy: 'mask-all-inputs' }`.
 - Tap actions follow the replay privacy rules. Inside an `OodlePrivacy`
   view of level `hidden` or `mask`, and anywhere under `mask-all` (except
   in an `allow` view), a tap is named only by its `oodle-action-name` prop
