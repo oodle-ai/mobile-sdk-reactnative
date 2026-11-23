@@ -182,6 +182,16 @@ and replay, so one build serves every run.
   app (`scripts/ci/device.sh`). CI emulators render in software, so
   measure frames and start time on a real device before you quote them.
 
+The `Replay probe` workflow (`scripts/ci/reference-replay-probe.sh`, each
+week and on request) checks if the Session Replay of the reference SDK
+records in the fixture when it sends to its own servers. In the
+comparison runs its Android replay records nothing, and
+`parity-allowlist.json` allows that once it is listed there. The probe
+sends to a separate RUM application (the `REFERENCE_PROBE_*` secrets)
+and gives its verdict from the debug log of the SDK; iOS is the control.
+When the probe shows that the Android replay records, remove the
+allowlist entry.
+
 This repo is public. Do not name other vendors or their products in
 files, branch names or commit messages: call the SDK that the comparison
 runs "the reference SDK", and other SDKs "other mobile RUM SDKs". Only

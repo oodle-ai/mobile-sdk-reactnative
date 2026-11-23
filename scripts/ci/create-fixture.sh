@@ -6,6 +6,11 @@
 # in one app, on each platform and React Native version.
 #
 # Usage: create-fixture.sh <react-native version> <sdk tarball> [none|oodle|reference|both]
+# With REFERENCE_PROBE_APPLICATION_ID, REFERENCE_PROBE_CLIENT_TOKEN and
+# REFERENCE_PROBE_SITE set, the fixture sends the data of the reference SDK
+# to the reference SDK's own servers with these credentials, with its debug
+# log on (the replay probe, scripts/ci/reference-replay-probe.sh). Otherwise
+# it sends to the mock collector, as in every other run.
 set -euo pipefail
 
 RN_VERSION="${1:?React Native version}"
@@ -29,11 +34,25 @@ npm install --no-audit --no-fund "$TARBALL" \
 cp "$REPO/fixtures/fieldwork/App.tsx" App.tsx
 rm -rf src
 cp -R "$REPO/fixtures/fieldwork/src" src
+# JSON keeps the values safe in the TypeScript source.
+REFERENCE_PROBE=null
+if [ -n "${REFERENCE_PROBE_APPLICATION_ID:-}" ]; then
+  REFERENCE_PROBE=$(node -e 'console.log(JSON.stringify({
+    applicationId: process.env.REFERENCE_PROBE_APPLICATION_ID,
+    clientToken: process.env.REFERENCE_PROBE_CLIENT_TOKEN ?? "",
+    site: process.env.REFERENCE_PROBE_SITE || "US1",
+  }))')
+fi
 cat > src/fixture-env.ts <<TS
 // Written by scripts/ci/create-fixture.sh.
-export const fixtureEnv: { provider: 'none' | 'oodle' | 'reference' | 'both'; autopilot: boolean } = {
+export const fixtureEnv: {
+  provider: 'none' | 'oodle' | 'reference' | 'both';
+  autopilot: boolean;
+  referenceProbe: { applicationId: string; clientToken: string; site: string } | null;
+} = {
   provider: '$PROVIDER',
   autopilot: true,
+  referenceProbe: $REFERENCE_PROBE,
 };
 TS
 

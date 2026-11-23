@@ -1,0 +1,201 @@
+name: Replay probe
+
+# Does the Session Replay of the reference SDK record in the Fieldwork
+# fixture when it sends to its own servers? In the comparison runs
+# (compare.yml), its Android replay records nothing, and
+# scripts/compare/parity-allowlist.json allows that until the cause is
+# known. This workflow builds the fixture with the reference SDK alone,
+# sending to a separate RUM application of its own, and runs one short
+# session on an emulator and on a simulator
+# (scripts/ci/reference-replay-probe.sh). iOS is the control: the replay of
+# the reference SDK records there in the comparison runs.
+#
+# Set up once (a separate RUM application keeps this data apart):
+#   gh secret set REFERENCE_PROBE_APPLICATION_ID
+#   gh secret set REFERENCE_PROBE_CLIENT_TOKEN
+#   gh secret set REFERENCE_PROBE_SITE           # for example US5
+# To also check what the servers stored (scripts/ci/reference-replay-check.mjs):
+#   gh secret set REFERENCE_PROBE_API_HOST       # the API host of that site
+#   gh secret set REFERENCE_PROBE_API_KEY
+#   gh secret set REFERENCE_PROBE_APP_KEY        # an application key that can read RUM events
+#
+# Secrets do not reach pull requests from forks or Dependabot, so the
+# probe runs on request and each week, not on pull requests.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 4 * * 1'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: replay-probe
+  cancel-in-progress: false
+
+env:
+  REFERENCE_PROBE_APPLICATION_ID: ${{ secrets.REFERENCE_PROBE_APPLICATION_ID }}
+  REFERENCE_PROBE_CLIENT_TOKEN: ${{ secrets.REFERENCE_PROBE_CLIENT_TOKEN }}
+  # A variable or a secret: the site is not secret, but either works.
+  REFERENCE_PROBE_SITE: ${{ vars.REFERENCE_PROBE_SITE || secrets.REFERENCE_PROBE_SITE || 'US1' }}
+
+jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the probe credentials
+        run: |
+          if [ -z "$REFERENCE_PROBE_APPLICATION_ID" ] || [ -z "$REFERENCE_PROBE_CLIENT_TOKEN" ]; then
+            echo "::error::Set the REFERENCE_PROBE_APPLICATION_ID and REFERENCE_PROBE_CLIENT_TOKEN secrets (see the top of this workflow)."
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 9
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: npm pack
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdk-tarball
+          path: oodle-ai-mobile-sdk-reactnative-*.tgz
+
+  android:
+    needs: sdk
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      PROBE_NAME: probe-${{ github.run_id }}-android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-tarball
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: zulu
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      - run: scripts/ci/create-fixture.sh latest oodle-ai-mobile-sdk-reactnative-*.tgz reference
+      - name: Build release APK
+        working-directory: ${{ env.FIXTURE_DIR }}/android
+        run: ./gradlew assembleRelease -PreactNativeArchitectures=x86_64 --no-daemon
+      # As in ci.yml: the build fills most of the disk.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          rm -rf "$FIXTURE_DIR/android/app/build/intermediates" "$FIXTURE_DIR/android/build" ~/.gradle/caches/build-cache-*
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - name: Probe on the emulator
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: 31
+          arch: x86_64
+          target: google_apis
+          cores: 4
+          ram-size: 4096M
+          disk-size: 4096M
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
+          script: bash scripts/ci/reference-replay-probe.sh android "${{ env.FIXTURE_DIR }}/android/app/build/outputs/apk/release/app-release.apk" "${{ runner.temp }}/probe"
+      - name: Check what the servers stored
+        if: always()
+        env:
+          REFERENCE_PROBE_API_HOST: ${{ secrets.REFERENCE_PROBE_API_HOST }}
+          REFERENCE_PROBE_API_KEY: ${{ secrets.REFERENCE_PROBE_API_KEY }}
+          REFERENCE_PROBE_APP_KEY: ${{ secrets.REFERENCE_PROBE_APP_KEY }}
+        run: node scripts/ci/reference-replay-check.mjs --launch "soak-$PROBE_NAME" --out "$RUNNER_TEMP/probe"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: probe-android
+          path: ${{ runner.temp }}/probe
+
+  ios:
+    needs: sdk
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      PROBE_NAME: probe-${{ github.run_id }}-ios
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: sdk-tarball
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - run: scripts/ci/create-fixture.sh latest oodle-ai-mobile-sdk-reactnative-*.tgz reference
+      - name: Install ccache
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: command -v ccache || brew install ccache
+      - name: Install pods
+        working-directory: ${{ env.FIXTURE_DIR }}/ios
+        run: |
+          bundle install
+          bundle exec pod install
+      # Uses the compiled objects that ci.yml saves. This workflow does not
+      # save its own.
+      - name: Restore ccache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/Library/Caches/ccache
+          key: ccache-v2-ios-latest-none
+          restore-keys: ccache-v2-ios-latest-
+      - name: Configure ccache
+        run: |
+          ccache --set-config max_size=3G
+          ccache --set-config sloppiness=clang_index_store,file_stat_matches,include_file_ctime,include_file_mtime,ivfsoverlay,pch_defines,modules,system_headers,time_macros
+          ccache --set-config file_clone=true
+          ccache --set-config depend_mode=true
+          ccache --set-config inode_cache=true
+      - name: Build for the simulator
+        working-directory: ${{ env.FIXTURE_DIR }}/ios
+        run: |
+          mkdir -p "$RUNNER_TEMP/probe"
+          LOG="$RUNNER_TEMP/probe/xcodebuild.log"
+          if ! xcodebuild -workspace OodleExample.xcworkspace -scheme OodleExample \
+            -configuration Release -sdk iphonesimulator \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build ARCHS=arm64 ONLY_ACTIVE_ARCH=YES \
+            C_COMPILER_LAUNCHER="$(command -v ccache)" CLANG_ENABLE_EXPLICIT_MODULES=NO \
+            CODE_SIGNING_ALLOWED=NO build > "$LOG" 2>&1; then
+            grep -E "error:|The following build commands failed" -A4 "$LOG" | head -150
+            exit 1
+          fi
+          tail -5 "$LOG"
+      - name: Boot a simulator
+        run: |
+          DEVICE=$(xcrun simctl list devices available -j |
+            python3 -c "import json,sys; d=json.load(sys.stdin)['devices']; print(next(x['udid'] for r in d.values() for x in r if x['name'].startswith('iPhone')))")
+          xcrun simctl boot "$DEVICE"
+          xcrun simctl bootstatus "$DEVICE" -b
+          echo "SIMULATOR=$DEVICE" >> "$GITHUB_ENV"
+      - name: Probe on the simulator
+        run: bash scripts/ci/reference-replay-probe.sh ios "$FIXTURE_DIR/ios/build/Build/Products/Release-iphonesimulator/OodleExample.app" "$RUNNER_TEMP/probe"
+      - name: Check what the servers stored
+        if: always()
+        env:
+          REFERENCE_PROBE_API_HOST: ${{ secrets.REFERENCE_PROBE_API_HOST }}
+          REFERENCE_PROBE_API_KEY: ${{ secrets.REFERENCE_PROBE_API_KEY }}
+          REFERENCE_PROBE_APP_KEY: ${{ secrets.REFERENCE_PROBE_APP_KEY }}
+        run: node scripts/ci/reference-replay-check.mjs --launch "soak-$PROBE_NAME" --out "$RUNNER_TEMP/probe"
+      - if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: probe-ios
+          path: ${{ runner.temp }}/probe
