@@ -64,6 +64,7 @@ jobs:
         with:
           name: sdk-tarball
           path: oodle-ai-mobile-sdk-reactnative-*.tgz
+          retention-days: 1
 
   android:
     needs: sdk
@@ -121,8 +122,11 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
+          # The device log holds the reference SDK's own log lines, and the
+          # artifacts of a public repo are open to every signed-in GitHub user.
           name: probe-android
           path: ${{ runner.temp }}/probe
+          retention-days: 1
 
   ios:
     needs: sdk
@@ -199,3 +203,4 @@ jobs:
         with:
           name: probe-ios
           path: ${{ runner.temp }}/probe
+          retention-days: 1
