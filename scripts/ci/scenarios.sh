@@ -122,7 +122,10 @@ crash_run() {
   start_app
   wait_for "the Oodle crash report of $name" 60 more_crashes_than "$crashes"
   # check-scenarios.mjs reports a missing Datadog crash; do not stop here.
-  wait_for "the Datadog crash report of $name" 45 datadog_crash "after-$name" || true
+  # A new process opens a new connection, and on the CI macOS runners the
+  # system proxy lookup for it can take about 30 s, on top of the upload
+  # delay of the Datadog SDK.
+  wait_for "the Datadog crash report of $name" 90 datadog_crash "after-$name" || true
   echo "$name" >> "$RAN"
 }
 
