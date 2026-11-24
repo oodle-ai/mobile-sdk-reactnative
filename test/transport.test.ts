@@ -123,10 +123,51 @@ describe('transport', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(sent).toHaveLength(1);
     enqueue('events', { i: 51 });
-    await vi.advanceTimersByTimeAsync(4999);
+    await vi.advanceTimersByTimeAsync(14_999);
     expect(sent).toHaveLength(1);
     await vi.advanceTimersByTimeAsync(1);
     expect(sent).toHaveLength(2);
+  });
+
+  // An item waits up to 15 s for the next flush. An app that ends in the
+  // foreground without warning (a native crash, the OS) must not lose
+  // more than the last 5 s of it.
+  it('writes a waiting queue to the outbox after 5 s, and the next start sends it once', async () => {
+    enqueue('events', { n: 1 });
+    await vi.advanceTimersByTimeAsync(4999);
+    expect(storage.get('outbox')).toBeNull();
+    await vi.advanceTimersByTimeAsync(1);
+    expect(storage.get('outbox')).toContain('"n":1');
+    expect(sent).toHaveLength(0);
+
+    restart();
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+  });
+
+  it('sends a queue that the outbox holds once, also when the app ends after the flush', async () => {
+    enqueue('events', { n: 1 });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(storage.get('outbox')).toContain('"n":1');
+    // The flush writes the outbox again with the body and its id; the
+    // answer removes it.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(delivered()).toBe(1);
+    expect(storage.get('outbox')).toBeNull();
+
+    restart();
+    restoreOutbox();
+    await vi.runAllTimersAsync();
+    expect(delivered()).toBe(1);
+  });
+
+  it('does not write the queue when the flush interval is 5 s or less', async () => {
+    setConfig(resolveConfig({ instanceId: 'inst', apiKey: 'key', endpoint: 'https://c.oodle.ai', service: 'app', flushIntervalMs: 2000 }, 'android').config!);
+    enqueue('events', { n: 1 });
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(delivered()).toBe(1);
+    expect(storage.get('outbox')).toBeNull();
   });
 
   // A measure capped at 64 KB let a "500 KB" batch hold megabytes of replay.

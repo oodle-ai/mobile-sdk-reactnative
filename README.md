@@ -113,7 +113,7 @@ OodleSessionReplay.start() / .stop() / .isRecording()
 | `vitals` | `true` | Refresh rate, slow and frozen frames, memory, CPU per view |
 | `tags` | none | Tags on every event |
 | `sessionReplay` | on, `sampleRate: 10` | `false`, or `{ sampleRate, textAndInputPrivacy, touchPrivacy, startRecordingImmediately }`. `sampleRate` is the percentage of sampled sessions that record a replay |
-| `flushIntervalMs` | `5000` | Batch interval |
+| `flushIntervalMs` | `15000` | Batch interval. The app going to the background, a crash and a full batch (50 items or 500 KB) send at once. While items wait, they are written to disk every 5 s |
 | `beforeSend` | none | Change an event, or return `null` to drop it |
 | `verbosity` | `'warn'` | SDK log level |
 

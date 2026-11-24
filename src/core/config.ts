@@ -2,6 +2,9 @@ import type { Verbosity } from './logger';
 
 const DEFAULT_REPLAY_SAMPLE_RATE = 10;
 
+/** The batch flush interval when the app does not set one (flushIntervalMs). */
+export const DEFAULT_FLUSH_INTERVAL_MS = 15_000;
+
 export type TrackingConsent = 'granted' | 'not-granted' | 'pending';
 
 export type Propagator = 'tracecontext' | 'b3' | 'b3multi' | 'datadog';
@@ -112,7 +115,12 @@ export interface OodleRumConfig {
   /** Session replay settings, or false to turn replay off. Default on. */
   sessionReplay?: boolean | SessionReplayConfig;
 
-  /** Batch flush interval. Default 5000. */
+  /**
+   * Batch flush interval. Default 15000: about the requests and the delay
+   * of the reference SDK in the comparison runs, with fewer, larger
+   * uploads, which compress better. The app going to the
+   * background, a crash and a full batch send at once.
+   */
   flushIntervalMs?: number;
   /** SDK console output. Default `'warn'`. */
   verbosity?: Verbosity;
@@ -343,7 +351,7 @@ export function resolveConfig(
     flushIntervalMs:
       typeof input.flushIntervalMs === 'number' && input.flushIntervalMs >= 1000
         ? input.flushIntervalMs
-        : 5000,
+        : DEFAULT_FLUSH_INTERVAL_MS,
     verbosity: input.verbosity ?? 'warn',
     beforeSend:
       typeof input.beforeSend === 'function' ? input.beforeSend : undefined,

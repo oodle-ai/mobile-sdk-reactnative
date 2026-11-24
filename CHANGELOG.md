@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Uploads
+
+- The default `flushIntervalMs` is 15000, not 5000. In the comparison runs the SDK sent 5.0 requests per launch
+  against the reference SDK's 2.0 to 2.8; the replayed event times of
+  these runs give about 2.2 with 15 s. Larger bodies also compress better.
+  Events arrive later: the p95 delay goes from about 5 s to about 15 s,
+  the same as the reference SDK. The app going to the background, a crash
+  and a full batch still send at once. Set `flushIntervalMs` to keep the
+  old interval.
+- While items wait for a flush, the SDK writes them to its outbox on disk
+  every 5 s. An app that ends in the foreground without warning (a native
+  crash, the OS) loses at most the last 5 s of events, as before.
+
 ### Changes that alter the counts
 
 - A touch is a tap only when it runs a press handler (`onPress`,

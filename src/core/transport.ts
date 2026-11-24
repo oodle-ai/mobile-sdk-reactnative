@@ -2,7 +2,7 @@ import { observeServerDate } from './clock';
 import { gzipSync, strToU8 } from 'fflate';
 import { Platform } from 'react-native';
 import { SDK_VERSION } from '../version';
-import { getConfig } from './config';
+import { DEFAULT_FLUSH_INTERVAL_MS, getConfig } from './config';
 import { uuid } from './ids';
 import { INTERNAL_REQUEST } from './internal';
 import { logger } from './logger';
@@ -27,6 +27,8 @@ export const SPANS_BATCH_KEY = 'spans';
 
 const MAX_BATCH_ITEMS = 50;
 const MAX_BATCH_BYTES = 500_000;
+/** The longest time that a queued item is only in memory (scheduleQueuePersist). */
+const QUEUE_PERSIST_MS = 5000;
 const MAX_ITEM_BYTES = 256_000;
 /** Items held while consent is pending, per batch key. */
 const MAX_HELD_ITEMS = 1000;
@@ -106,6 +108,7 @@ let retryBytes = 0;
 let retryTimer: ReturnType<typeof setTimeout> | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let persistTimer: ReturnType<typeof setTimeout> | null = null;
+let queuePersistTimer: ReturnType<typeof setTimeout> | null = null;
 /** True after this process wrote an outbox that it has not removed. */
 let outboxOnDisk = false;
 /** True when that outbox also holds items from the batch queues. */
@@ -234,6 +237,7 @@ function afterAdd(q: Queue) {
     return;
   }
   scheduleFlush();
+  scheduleQueuePersist();
 }
 
 export function enqueue(key: string, item: Payload, bytesHint?: number) {
@@ -280,9 +284,27 @@ export function upsert(
   afterAdd(q);
 }
 
+/**
+ * A queued item waits in memory until the next flush, up to the flush
+ * interval. An app that ends in the foreground without warning (a native
+ * crash, the OS) loses what waits. So when the interval is longer than
+ * QUEUE_PERSIST_MS, the queue goes to the outbox after QUEUE_PERSIST_MS:
+ * at most that much is lost. The flush that sends the items then writes
+ * the outbox again (outboxHasHeld), so it holds them in their body, with
+ * its id.
+ */
+function scheduleQueuePersist() {
+  const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
+  if (queuePersistTimer || interval <= QUEUE_PERSIST_MS) return;
+  queuePersistTimer = setTimeout(() => {
+    queuePersistTimer = null;
+    if (hasQueuedItems()) persistOutbox();
+  }, QUEUE_PERSIST_MS);
+}
+
 function scheduleFlush() {
   if (flushTimer) return;
-  const interval = getConfig()?.flushIntervalMs ?? 5000;
+  const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   flushTimer = setTimeout(() => {
     flushTimer = null;
     flush();
@@ -339,6 +361,11 @@ export function flush() {
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
+  }
+  // The queues are taken below; a write for them is not needed.
+  if (queuePersistTimer && getConfig() && canSend() && !sendsHeld) {
+    clearTimeout(queuePersistTimer);
+    queuePersistTimer = null;
   }
   if (!getConfig() || !canSend() || sendsHeld) return;
   const bodies: RetryItem[] = [];
@@ -398,7 +425,7 @@ export function holdSends(held: boolean) {
   // Not at once: the process usually ends just after the handoff, and a
   // send in that moment is what the hold is for.
   if (held) return;
-  const interval = getConfig()?.flushIntervalMs ?? 5000;
+  const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   setTimeout(() => {
     flush();
     drainRetries();
@@ -685,6 +712,10 @@ export function persistOutbox(opts: { sync?: boolean } = {}) {
     clearTimeout(persistTimer);
     persistTimer = null;
   }
+  if (queuePersistTimer) {
+    clearTimeout(queuePersistTimer);
+    queuePersistTimer = null;
+  }
   if (restorePending) {
     // The outbox of the last run is not read yet; a write now would
     // replace it. It is read first, and sent later: this write can come
@@ -759,7 +790,7 @@ function scheduleRetryDrain() {
   retryTimer = setTimeout(() => {
     retryTimer = null;
     drainRetries();
-  }, getConfig()?.flushIntervalMs ?? 5000);
+  }, getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);
 }
 
 /** Adds the outbox of the last run to the queues. False when there is none. */
@@ -846,6 +877,8 @@ export function clearAll() {
   generation++;
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = null;
+  if (queuePersistTimer) clearTimeout(queuePersistTimer);
+  queuePersistTimer = null;
   // The outbox of the last run is deleted unread.
   restorePending = false;
   removeOutbox();
@@ -859,8 +892,8 @@ export function resume() {
 
 /** Test hook. */
 export function resetTransport() {
-  for (const t of [retryTimer, flushTimer, persistTimer]) if (t) clearTimeout(t);
-  retryTimer = flushTimer = persistTimer = null;
+  for (const t of [retryTimer, flushTimer, persistTimer, queuePersistTimer]) if (t) clearTimeout(t);
+  retryTimer = flushTimer = persistTimer = queuePersistTimer = null;
   queues.clear();
   retryQueue = [];
   retryBytes = 0;
