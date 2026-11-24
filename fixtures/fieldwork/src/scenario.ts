@@ -1,5 +1,5 @@
 import { type Tab, wait } from './autopilot';
-import { collectorUrl, type TelemetryProvider } from './config';
+import { collectorUrl, type SdkSettings, type TelemetryProvider } from './config';
 import { runSoak } from './soak';
 import { telemetry } from './telemetry';
 
@@ -15,9 +15,11 @@ export type Scenario = {
   steps: number;
   /** True starts the reference SDK with its debug log, to find why it sends nothing. */
   debug?: boolean;
+  /** The upload and log settings of both SDKs (config.ts). Default `ci`. */
+  settings: SdkSettings;
 };
 
-export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12 };
+export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12, settings: 'ci' };
 
 const PROVIDERS: TelemetryProvider[] = ['none', 'oodle', 'reference', 'both'];
 const int = (value: unknown, fallback: number) =>
@@ -51,10 +53,23 @@ export async function fetchScenario(): Promise<Scenario> {
       seed: int(body.seed, NO_SCENARIO.seed),
       steps: int(body.steps, NO_SCENARIO.steps),
       debug: body.debug === true,
+      settings: body.settings === 'shipped' ? 'shipped' : 'ci',
     };
   } catch {
     return NO_SCENARIO;
   }
+}
+
+/**
+ * Tells the mock collector that the SDKs and the first view started. The
+ * collector notes the time of the call: with the time that CI set the
+ * scenario, it gives the start time of the launch, from outside the app
+ * (scripts/compare/cost.mjs). Neither SDK records a request to the
+ * collector.
+ */
+export function reportReady(scenario: Scenario) {
+  if (scenario.name === 'none') return;
+  fetch(`${collectorUrl}/fixture/ready?name=${encodeURIComponent(scenario.name)}`).catch(() => undefined);
 }
 
 /**

@@ -25,6 +25,8 @@
 #   SEED      seed of the first launch; launch n uses SEED+n (default 1)
 #   STEPS     steps of each walk (default 12)
 #   ROUND     a label for this run, in the scenario names (default 1)
+#   SDK_SETTINGS  ci|shipped: the upload and log settings of both SDKs
+#             (fixtures/fieldwork/src/config.ts, default ci)
 #   REFERENCE_DEBUG  1 starts the reference SDK with its debug log, in the device log
 set -euo pipefail
 PLATFORM="${1:?android|ios}"
@@ -35,6 +37,7 @@ LAUNCHES="${LAUNCHES:-10}"
 SEED="${SEED:-1}"
 STEPS="${STEPS:-12}"
 ROUND="${ROUND:-1}"
+SDK_SETTINGS="${SDK_SETTINGS:-ci}"
 COLLECTOR=http://localhost:4318
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/../ci/device.sh"
@@ -51,8 +54,8 @@ ENDS=(background return kill)
 
 set_scenario() {
   curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$(printf \
-    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s}' \
-    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON")" > /dev/null
+    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s,"settings":"%s"}' \
+    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON" "$SDK_SETTINGS")" > /dev/null
 }
 
 # The number of walks of this run that ended and reached the collector,
@@ -77,6 +80,9 @@ clear_app_data
 for i in $(seq 1 "$LAUNCHES"); do
   name="soak-$PREFIX-$i"
   end=${ENDS[$(((i - 1) % ${#ENDS[@]}))]}
+  # The app ends before the scenario is set, so the collector's time of the
+  # set is the start of the launch (the start time in cost.mjs).
+  kill_app
   set_scenario "$name" $((SEED + i))
   start_app
   frames_reset
@@ -88,6 +94,7 @@ for i in $(seq 1 "$LAUNCHES"); do
   case "$end" in
     kill)
       cpu=$(cpu_ms "$pid")
+      threads=$(thread_cpu_json "$pid")
       mem=$(mem_kb)
       frames=$(frames_json)
       kill_app
@@ -100,14 +107,15 @@ for i in $(seq 1 "$LAUNCHES"); do
         sleep 5
       fi
       cpu=$(cpu_ms "$pid")
+      threads=$(thread_cpu_json "$pid")
       mem=$(mem_kb)
       frames=$(frames_json)
       ;;
   esac
-  printf '{"platform":"%s","provider":"%s","replay":"%s","round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"mem_kb":%s,"frames":%s}\n' \
-    "$PLATFORM" "$PROVIDER" "$REPLAY" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
-    "${START_MS:-null}" "${cpu:-null}" "${mem:-null}" "${frames:-null}" >> "$LAUNCHES_FILE"
-  echo "$name: end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms, mem ${mem:--} KB"
+  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
+    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
+    "${START_MS:-null}" "${cpu:-null}" "${threads:-null}" "${mem:-null}" "${frames:-null}" >> "$LAUNCHES_FILE"
+  echo "$name: end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
 done
 
 # One more start sends what the SDKs saved: the last launch, or one whose

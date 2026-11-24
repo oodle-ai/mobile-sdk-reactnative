@@ -16,7 +16,7 @@ import {
   TextAndInputPrivacyLevel,
   TouchPrivacyLevel,
 } from '@datadog/mobile-react-native-session-replay';
-import { apiHost, collectorUrl, referenceConfig, referenceProbe } from '../config';
+import { apiHost, collectorUrl, referenceConfig, referenceProbe, shippedSettings } from '../config';
 import type { Telemetry } from './types';
 
 // With both SDKs on, the reference SDK's XHR tracking also sees the Oodle SDK's
@@ -62,9 +62,8 @@ export const reference: Telemetry = {
         verbosity: referenceProbe ? SdkVerbosity.DEBUG : verbosity,
         // Small, frequent uploads to the mock collector let the CI
         // scenarios check that the reference SDK also reported a crash, while the
-        // Oodle SDK was installed next to it.
-        uploadFrequency: UploadFrequency.FREQUENT,
-        batchSize: BatchSize.SMALL,
+        // Oodle SDK was installed next to it. The cost runs use the defaults.
+        ...(shippedSettings() ? {} : { uploadFrequency: UploadFrequency.FREQUENT, batchSize: BatchSize.SMALL }),
         // The mock collector is plain HTTP. On Android, the reference SDK sends
         // only over TLS unless this is set; iOS does not read it.
         // The replay probe sends to the SDK's own servers.

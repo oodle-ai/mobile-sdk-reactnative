@@ -154,6 +154,19 @@ async function startCollector(out: string) {
     fetch(`${base}${url}`, { method: 'POST', body, headers }).then((r) => r.status);
   return {
     scenario: (body: object) => post('/fixture/scenario', JSON.stringify(body)),
+    /** What the fixture app does at start: it reads the scenario, then reports ready. */
+    appStart: async (name: string, readyAfterMs: number) => {
+      await fetch(`${base}/fixture/scenario`).then((r) => r.text());
+      await new Promise((resolve) => setTimeout(resolve, readyAfterMs));
+      return fetch(`${base}/fixture/ready?name=${encodeURIComponent(name)}`).then((r) => r.status);
+    },
+    /** A body of client spans (OTLP/JSON), as the SDK sends to /v1/rum/traces. */
+    spans: (count: number) =>
+      post(
+        '/v1/rum/traces',
+        JSON.stringify({ resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ spans: Array.from({ length: count }, (_, i) => ({ name: `GET ${i}` })) }] }] }),
+        { 'content-type': 'application/json', 'x-api-key': 'k', 'x-oodle-instance': 'i', 'x-oodle-batch-id': `t-${Math.random()}` },
+      ),
     oodle: (events: object[], replay: object[] = [], batchId = `b-${Math.random()}`) => {
       const lines = [JSON.stringify({ sdk_name: 'react-native', sdk_version: 'test' })];
       lines.push(JSON.stringify({ type: 'events', count: events.length }), JSON.stringify(events));
@@ -223,7 +236,7 @@ function run(script: string, out: string, ...args: string[]) {
 }
 
 const launchRow = (provider: string, round: number, launch: number, cpu: number) =>
-  JSON.stringify({ platform: 'android', provider, replay: 'on', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, mem_kb: 100_000, frames: null });
+  JSON.stringify({ platform: 'android', provider, replay: 'on', settings: 'shipped', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, threads: { main: cpu / 4, js: cpu / 2 }, mem_kb: 100_000, frames: null });
 
 describe('comparison scripts', () => {
   const tmp = () => {
@@ -326,7 +339,11 @@ describe('comparison scripts', () => {
       for (const launch of [1, 2]) {
         const name = `soak-${provider}-on-r1-${launch}`;
         await c.scenario({ name, provider });
-        if (provider === 'oodle') await c.oodle(oodleLaunch(name, `oo-${launch}`, STEPS, t0), [{ session_id: `oo-${launch}`, segment_index: 0, events: [{ type: 2, data: 'x'.repeat(4000) }] }]);
+        expect(await c.appStart(name, provider === 'none' ? 0 : 50)).toBe(204);
+        if (provider === 'oodle') {
+          await c.oodle(oodleLaunch(name, `oo-${launch}`, STEPS, t0), [{ session_id: `oo-${launch}`, segment_index: 0, events: [{ type: 2, data: 'x'.repeat(4000) }] }]);
+          expect(await c.spans(2)).toBe(200);
+        }
         if (provider === 'reference') {
           await c.reference(referenceLaunch(name, `ref-${launch}`, STEPS, t0));
           await c.referenceReplay(`ref-${launch}`);
@@ -339,13 +356,25 @@ describe('comparison scripts', () => {
     expect(r.status).toBe(0);
     const { rows: cost } = JSON.parse(fs.readFileSync(path.join(out, 'cost.json'), 'utf8'));
     const by = (p: string) => cost.find((x: { provider: string }) => x.provider === p);
-    expect(by('none')).toMatchObject({ launches: 2, cpu_ms: 1000, requests: 0 });
-    expect(by('oodle')).toMatchObject({ launches: 2, cpu_ms: 1200, requests: 1 });
+    expect(by('none')).toMatchObject({ launches: 2, cpu_ms: 1000, main_ms: 250, js_thread_ms: 500, requests: 0 });
+    expect(by('oodle')).toMatchObject({ launches: 2, cpu_ms: 1200, requests: 1, span_requests: 1 });
+    // The difference from no SDK in each round, with its range.
+    expect(by('oodle').cpu_ms_delta).toEqual({ median: 200, min: 200, max: 200 });
+    expect(by('oodle').js_thread_ms_delta).toEqual({ median: 100, min: 100, max: 100 });
     expect(by('oodle').replay_kb).toBeGreaterThan(0);
     expect(by('oodle').events_kb).toBeGreaterThan(0);
+    expect(by('oodle').spans_kb).toBeGreaterThan(0);
+    // Start time by the collector's clock: the app reported ready 50 ms after it read the scenario.
+    expect(by('none').ready_ms).toBeGreaterThanOrEqual(0);
+    expect(by('oodle').ready_ms).toBeGreaterThanOrEqual(50);
+    expect(by('oodle').js_start_ms).toBeLessThan(by('oodle').ready_ms);
+    expect(by('oodle').js_to_ready_ms).toBeGreaterThanOrEqual(50);
+    expect(by('oodle').js_to_ready_ms_delta.median).toBeGreaterThanOrEqual(40);
     expect(by('reference')).toMatchObject({ requests: 2 });
     expect(by('reference').replay_kb).toBeGreaterThan(0);
     expect(by('reference').lag_p50_ms).toBeGreaterThan(0);
     expect(r.stdout).toContain('1200 (+200)');
+    expect(r.stdout).toContain('SDK settings: shipped');
+    expect(by('reference')).toMatchObject({ span_requests: 0, spans_kb: 0 });
   });
 });
