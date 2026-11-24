@@ -368,6 +368,8 @@ describe('comparison scripts', () => {
     expect(by('none').ready_ms).toBeGreaterThanOrEqual(0);
     expect(by('oodle').ready_ms).toBeGreaterThanOrEqual(50);
     expect(by('oodle').js_start_ms).toBeLessThan(by('oodle').ready_ms);
+    expect(by('oodle').js_to_ready_ms).toBeGreaterThanOrEqual(50);
+    expect(by('oodle').js_to_ready_ms_delta.median).toBeGreaterThanOrEqual(40);
     expect(by('reference')).toMatchObject({ requests: 2 });
     expect(by('reference').replay_kb).toBeGreaterThan(0);
     expect(by('reference').lag_p50_ms).toBeGreaterThan(0);

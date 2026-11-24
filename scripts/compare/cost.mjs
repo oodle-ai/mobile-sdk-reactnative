@@ -52,6 +52,11 @@ const DEVICE = {
   main_ms: (l) => l.threads?.main,
   js_thread_ms: (l) => l.threads?.js,
   mem_kb: (l) => l.mem_kb,
+  // From the app's read of the scenario to its ready call: the start of
+  // the SDKs and the first view. The time before the read (the system
+  // starts the app, the JS loads) does not depend on the SDKs, and on the
+  // iOS simulator it changes by some 100 ms from one launch to the next.
+  js_to_ready_ms: (l) => (typeof l.ready_ms === 'number' && typeof l.js_ms === 'number' ? l.ready_ms - l.js_ms : null),
   ready_ms: (l) => l.ready_ms,
   js_start_ms: (l) => l.js_ms,
   first_frame_ms: (l) => l.start_ms,
@@ -137,12 +142,12 @@ const lines = [
   '',
   `Per launch: the median over rounds of the mean over the launches of a round. In brackets: the difference from the launches with no SDK (the median over rounds; then the lowest…highest round). SDK settings: ${settings || '–'}.`,
   '',
-  '| Replay | SDK | Launches | CPU ms | Main thread ms | JS thread ms | Memory KB | Ready ms | First frame ms | Janky frames |',
+  '| Replay | SDK | Launches | CPU ms | Main thread ms | JS thread ms | Memory KB | JS to ready ms | First frame ms | Janky frames |',
   '|---|---|---|---|---|---|---|---|---|---|',
 ];
 for (const r of rows) {
   lines.push(
-    `| ${r.replay} | ${sdkName(r)} | ${r.launches} | ${withDelta(r, 'cpu_ms')} | ${withDelta(r, 'main_ms')} | ${withDelta(r, 'js_thread_ms')} | ${withDelta(r, 'mem_kb')} | ${withDelta(r, 'ready_ms')} | ${withDelta(r, 'first_frame_ms')} | ${withDelta(r, 'janky', 1)} |`,
+    `| ${r.replay} | ${sdkName(r)} | ${r.launches} | ${withDelta(r, 'cpu_ms')} | ${withDelta(r, 'main_ms')} | ${withDelta(r, 'js_thread_ms')} | ${withDelta(r, 'mem_kb')} | ${withDelta(r, 'js_to_ready_ms')} | ${withDelta(r, 'first_frame_ms')} | ${withDelta(r, 'janky', 1)} |`,
   );
 }
 lines.push(
@@ -157,7 +162,7 @@ for (const r of rows.filter((x) => x.provider !== 'none')) {
 }
 lines.push(
   '',
-  '- **Ready ms**: from the time that CI set the scenario to the app\'s call after both SDKs and the first view started, by the clock of the mock collector. It includes the app\'s read of the scenario, the same for each SDK.',
+  '- **JS to ready ms**: from the app\'s read of its scenario (the JS runs) to its call after the SDKs and the first view started, by the clock of the mock collector. It includes one request to the collector and the first render, the same for each SDK. cost.json also has the time from the launch to each of the two (`js_start_ms`, `ready_ms`).',
   '- **First frame ms** (Android): the system\'s time to the first frame of the activity. That is before the JS runs, so it does not include the start of the SDKs.',
   '- **Requests** and **Events KB** leave out client spans, which have their own columns. The reference SDK sends no spans to the collector.',
 );
