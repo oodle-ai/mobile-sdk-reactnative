@@ -94,6 +94,13 @@ keeps these rules (`src/core/transport.ts`):
 - The outbox of the last run is read after the first frame
   (`deferRestoreOutbox`). A write before that reads it first, so the file
   is never replaced unread. A crash queued at start is written at once.
+- A flush sends what is queued every `flushIntervalMs` (default 15 s: about
+  the requests and the delay of the reference SDK in the comparison runs;
+  fewer, larger bodies, which compress better). While
+  items wait, the queue goes to the outbox after 5 s
+  (`scheduleQueuePersist`), so an app that ends in the foreground without
+  warning loses at most that much. The next flush then writes the outbox
+  again with the body and its id, as for other queued items in it.
 - On iOS native code compresses and posts each body (`postGzip`), off the
   JS thread. Android compresses a string body itself. The envelope header
   has `sdk_name: "react-native"` and `sdk_version`.
