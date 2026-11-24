@@ -951,6 +951,147 @@ describe('OodleRum end to end', () => {
     expect(events('action').find((a) => a.action_name === 'sent again')).toBeDefined();
   });
 
+  function pressable(label: string) {
+    const fiber = {
+      type: { displayName: 'Pressable' },
+      memoizedProps: { onPress: () => {}, accessibilityLabel: label },
+      return: null,
+    };
+    return { _targetInst: fiber };
+  }
+
+  const tapsOn = (label: string) =>
+    events('action').filter((a) => a.action_type === 'tap' && a.action_text === label);
+
+  it('counts a touch as a tap only when a press handler runs for it', async () => {
+    const press = await import('../src/events/press-tracking');
+    expect(press.isPressTrackingActive()).toBe(true);
+    sdk.OodleRum.startView('home-press-key', 'Home');
+    const React = (await import('react')).default;
+    const runtime = (await import('react/jsx-runtime')).default as unknown as {
+      jsx: (type: unknown, props: unknown) => { props: Record<string, () => void> };
+    };
+    const onPress = vi.fn();
+    type Element = { props: Record<string, () => void> };
+    const first = React.createElement('View', { onPress }) as unknown as Element;
+    // One wrapper for each handler: memoized components see no change.
+    expect((React.createElement('View', { onPress }) as unknown as Element).props.onPress).toBe(first.props.onPress);
+    expect(first.props.onPress).not.toBe(onPress);
+    // Code compiled with the automatic JSX transform gets the same wrapper.
+    expect(runtime.jsx('View', { onPress }).props.onPress).toBe(first.props.onPress);
+
+    const ev = pressable('Open FW-1043');
+    const touch = (pressBeforeEnd = false, press = true) => {
+      const t = Date.now();
+      actions.touchStarted();
+      if (pressBeforeEnd && press) first.props.onPress();
+      actions.touchEnded(ev, { x: 10, y: 10, t }, { x: 11, y: 10, t: t + 60 });
+      if (!pressBeforeEnd && press) first.props.onPress();
+    };
+    // A touch that stops a scrolling list runs no press handler.
+    touch(false, false);
+    // React Native runs onPress as the touch ends.
+    touch();
+    // A gesture library can run it before the touch ends.
+    touch(true);
+    await settle();
+    expect(onPress).toHaveBeenCalledTimes(2);
+    expect(tapsOn('Open FW-1043')).toHaveLength(2);
+  });
+
+  it('marks a tap that an error follows within 100 ms as an error tap', async () => {
+    sdk.OodleRum.startView('shift-key', 'Shift');
+    const tap = (label: string) => {
+      const t = Date.now();
+      actions.recordTap(pressable(label), { x: 100, y: 300, t }, { x: 100, y: 300, t: t + 50 });
+      return t + 50;
+    };
+    const at = tap('Confirm clock in');
+    await vi.advanceTimersByTimeAsync(40);
+    sdk.OodleRum.addError(new Error('Complete a safe vehicle inspection today before you clock in.'));
+    await vi.advanceTimersByTimeAsync(500);
+    // An error after the window does not make the tap an error tap.
+    tap('Start vehicle inspection');
+    await vi.advanceTimersByTimeAsync(150);
+    sdk.OodleRum.addError(new Error('later'));
+    await vi.advanceTimersByTimeAsync(500);
+    // The press handler ran 60 ms after the touch ended. The window starts
+    // at the touch, so an error 105 ms after it does not count (as in
+    // the reference SDK), although it came 45 ms after the press.
+    const ended = Date.now() - 60;
+    actions.recordTap(pressable('Late press'), { x: 100, y: 300, t: ended - 50 }, { x: 100, y: 300, t: ended });
+    await vi.advanceTimersByTimeAsync(45);
+    sdk.OodleRum.addError(new Error('after the window'));
+    await settle();
+
+    expect(tapsOn('Late press')[0]).toMatchObject({ is_frustration: 0 });
+    const [errorTap] = tapsOn('Confirm clock in');
+    expect(errorTap).toMatchObject({
+      app_screen_name: 'Shift',
+      is_frustration: 1,
+      action_frustration_types: 'error_tap',
+    });
+    // The tap keeps the time it happened, not the time it was sent.
+    expect(Date.parse(String(errorTap.timestamp))).toBe(at);
+    const [plain] = tapsOn('Start vehicle inspection');
+    expect(plain.is_frustration).toBe(0);
+    expect(plain.action_frustration_types).toBeUndefined();
+    // An error tap is a tap and a frustration.
+    const view = events('view').filter((v) => v.app_screen_name === 'Shift').pop();
+    expect(view).toMatchObject({ view_action_count: 3, view_frustration_count: 1 });
+  });
+
+  it('marks a tap as an error tap when its press handler sends an error at once, before the touch ends', async () => {
+    sdk.OodleRum.startView('validate-key', 'Validate');
+    const React = (await import('react')).default;
+    type Element = { props: Record<string, () => void> };
+    const button = React.createElement('View', {
+      onPress: () => sdk.OodleRum.addError(new Error('Enter a site code.')),
+    }) as unknown as Element;
+    const plain = React.createElement('View', { onPress: () => {} }) as unknown as Element;
+    const touch = (label: string, el: Element) => {
+      const t = Date.now();
+      actions.touchStarted();
+      // React Native runs onPress as the responder is released, before
+      // the provider sees the end of the touch.
+      el.props.onPress();
+      actions.touchEnded(pressable(label), { x: 5, y: 5, t }, { x: 5, y: 5, t: Date.now() });
+    };
+    touch('Save site', button);
+    await vi.advanceTimersByTimeAsync(500);
+    // An error from before the touch is not the press's error.
+    sdk.OodleRum.addError(new Error('background sync failed'));
+    await vi.advanceTimersByTimeAsync(20);
+    touch('Refresh', plain);
+    await settle();
+
+    expect(tapsOn('Save site')[0]).toMatchObject({ is_frustration: 1, action_frustration_types: 'error_tap' });
+    expect(tapsOn('Refresh')[0]).toMatchObject({ is_frustration: 0 });
+  });
+
+  it('sends an open tap on its own screen when the screen changes, and before a crash', async () => {
+    const errors = await import('../src/events/errors');
+    sdk.OodleRum.startView('order-key', 'Order');
+    let t = Date.now();
+    actions.recordTap(pressable('Open my shift'), { x: 1, y: 1, t }, { x: 1, y: 1, t: t + 40 });
+    // The tap opens the next screen at once, inside the tap's window.
+    sdk.OodleRum.startView('shift-next-key', 'Shift next');
+    t = Date.now();
+    actions.recordTap(pressable('Crash now'), { x: 1, y: 1, t }, { x: 1, y: 1, t: t + 40 });
+    errors.addError(new Error('fatal'), undefined, 'source', true);
+    await settle();
+
+    expect(tapsOn('Open my shift')[0]).toMatchObject({ app_screen_name: 'Order', is_frustration: 0 });
+    // The crash sends the open tap first, as an error tap: the outbox is
+    // written at once, and the process ends soon after.
+    const sent = events();
+    const crashTap = sent.findIndex((e) => e.action_text === 'Crash now');
+    const crash = sent.findIndex((e) => e.event_type === 'error' && e.exception_message === 'fatal');
+    expect(crashTap).toBeGreaterThanOrEqual(0);
+    expect(crashTap).toBeLessThan(crash);
+    expect(sent[crashTap]).toMatchObject({ is_frustration: 1, action_frustration_types: 'error_tap' });
+  });
+
   // Keep this test last: it starts the transport again, as a new start
   // of the app does.
   it('sends a crash after an error storm that used up the rate limit', async () => {

@@ -4,6 +4,7 @@ import { uuid } from '../core/ids';
 import { getDeviceInfo, native, type NativeVitals } from '../core/native';
 import { getSession, isSessionExpired, peekSession } from '../core/session';
 import { attributesJSON, canRecord, emitViewUpdate, setViewCounter, type EventData } from './emit';
+import { releaseTap } from './held-tap';
 import { setCurrentViewInfo, type ViewInfo } from './view-state';
 import { isoTime } from '../core/clock';
 
@@ -175,7 +176,9 @@ function countInView(data: EventData) {
   switch (data.event_type) {
     case 'action':
       if (data.is_frustration === 1) active.frustrationCount++;
-      else active.actionCount++;
+      // An error tap is a tap and a frustration. A rage tap is sent in
+      // addition to the taps it counts, so it is a frustration only.
+      if (data.is_frustration !== 1 || data.action_type !== 'rage_tap') active.actionCount++;
       break;
     case 'error':
       active.errorCount++;
@@ -242,6 +245,8 @@ export function startView(
     if (active.key === key) return;
     stopView(active.key);
   }
+  // A tap that is still open belongs to the screen it was made on.
+  releaseTap();
   // A new screen ends the view the app left in the background.
   if (paused) {
     const left = paused;
@@ -292,6 +297,7 @@ export function startView(
 }
 
 export function stopView(key?: string) {
+  releaseTap();
   if (!active && paused && (key === undefined || paused.key === key)) {
     const left = paused;
     paused = null;

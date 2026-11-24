@@ -5,6 +5,7 @@ import { logger } from '../core/logger';
 import { flush, persistOutbox } from '../core/transport';
 import { canRecord, emit } from './emit';
 import { drainNativeEvents } from './errors';
+import { releaseTap } from './held-tap';
 import { startLongTaskTracking, stopLongTaskTracking } from './longtasks';
 import { flushActiveView, pauseViews, resumeViews } from './views';
 
@@ -48,6 +49,8 @@ function toBackground() {
   stopLongTaskTracking();
   stopDrain();
   drainNativeEvents();
+  // The open tap goes into the outbox that is written below.
+  releaseTap();
   flushActiveView();
   emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'background' }, false);
   pauseViews();

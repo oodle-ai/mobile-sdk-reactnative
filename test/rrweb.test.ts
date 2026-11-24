@@ -272,11 +272,24 @@ describe('styleFor', () => {
     expect(style).not.toContain('pre-wrap');
   });
 
-  it('wraps a text without device lines, as before', () => {
-    const style = styleFor({ ...base, k: 't', tx: 'Office' });
+  it('wraps a text without device lines when its box holds more than one line', () => {
+    const style = styleFor({ ...base, h: 40, k: 't', tx: 'Office hours and notes' });
     expect(style).toContain('white-space:pre-wrap');
     expect(style).toContain('overflow:hidden');
     expect(style).toContain('line-height:1.2');
+  });
+
+  it('draws a one-line text without device lines on one line, unclipped', () => {
+    // A native header title: its box is as wide as the device's font
+    // drew it, and the browser's font is wider. Wrapped, "shift" went to
+    // a second line below the box, and the title showed as "My".
+    const title = { ...base, w: 61, h: 19.3, k: 't' as const, tx: 'My shift', fs: 16, fw: 600 };
+    const style = styleFor(title);
+    expect(style).toContain('white-space:pre');
+    expect(style).toContain('overflow:visible');
+    expect(style).not.toContain('pre-wrap');
+    // A text with a line break of its own keeps its lines.
+    expect(styleFor({ ...title, tx: 'My\nshift' })).toContain('pre-wrap');
   });
 
   it('draws the picture of a vector drawing in a child, and only a PNG data URL', () => {

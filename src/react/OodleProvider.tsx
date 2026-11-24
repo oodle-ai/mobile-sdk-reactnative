@@ -1,6 +1,6 @@
 import React, { useRef } from 'react';
 import { StyleSheet, View, type GestureResponderEvent, type StyleProp, type ViewStyle } from 'react-native';
-import { recordTap, type TouchPoint } from '../events/actions';
+import { touchEnded, touchStarted, type TouchPoint } from '../events/actions';
 import { recordTouchEnd, recordTouchMove, recordTouchStart } from '../replay/recorder';
 import { OodleRum } from '../rum';
 import type { OodleRumConfig } from '../core/config';
@@ -45,6 +45,7 @@ export function OodleProvider({ children, config, style }: OodleProviderProps) {
           const p = point(e);
           // A second finger turns the gesture into a pinch, not a tap.
           start.current = touches > 1 ? null : { point: p, event: e };
+          touchStarted();
           recordTouchStart(p.x, p.y);
         } catch {
           // instrumentation must never break a touch
@@ -64,7 +65,7 @@ export function OodleProvider({ children, config, style }: OodleProviderProps) {
           const s = start.current;
           start.current = null;
           const tap = Boolean(s) && touchCount.current <= 1;
-          if (s && tap) recordTap(s.event, s.point, p);
+          if (s && tap) touchEnded(s.event, s.point, p);
           recordTouchEnd(p.x, p.y, tap);
         } catch {
           // ignore

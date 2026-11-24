@@ -122,6 +122,25 @@ once, also when its session ended first (an idle screen, a long time
 away): the closing update goes out on the view's own session
 (`emitViewUpdate`), and is not activity.
 
+## A tap is a press
+
+As in the reference SDK, a touch is a tap only when a press handler runs
+for it. `src/events/press-tracking.ts` wraps the press props (`onPress`,
+`onLongPress`, `onValueChange`) of each element that React creates, from
+`React.createElement` and the JSX runtime.
+
+- A handler gives the same wrapper each time, so memoized components see
+  no change. A wrapper calls the SDK before the handler, and an error in
+  the SDK never stops the press.
+- React Native runs `onPress` before the end of the touch, and a gesture
+  library can run it after. `touchEnded` and `pressed` in
+  `src/events/actions.ts` match the two within `PRESS_MATCH_MS`.
+- A tap is held for `ERROR_TAP_WINDOW_MS` (`src/events/held-tap.ts`). An
+  error in that time makes it an error tap. The window starts at the
+  press, so an error that the handler sends at once counts. A held tap is
+  sent before the screen changes, the app goes to the background, or a
+  crash is sent.
+
 ## Replay is rrweb
 
 Native code returns wireframes; `src/replay/rrweb.ts` turns them into

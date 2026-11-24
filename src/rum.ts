@@ -45,6 +45,7 @@ import {
 } from './events/errors';
 import { installLifecycle, isForeground } from './events/lifecycle';
 import { startLongTaskTracking, stopLongTaskTracking } from './events/longtasks';
+import { installPressTracking } from './events/press-tracking';
 import { installResourceTracking } from './events/resources';
 import * as views from './events/views';
 import {
@@ -181,6 +182,8 @@ function initUnchecked(input: OodleRumConfig): boolean {
   if (hasQueuedItems()) restoreOutbox();
   else deferRestoreOutbox(afterFirstFrame);
 
+  // Taps count only when they press something, as in the reference SDK.
+  if (config.trackInteractions) installPressTracking(actions.pressed);
   if (config.trackErrors) installErrorTracking();
   if (config.trackConsole) installConsoleTracking();
   if (config.trackResources) installResourceTracking();

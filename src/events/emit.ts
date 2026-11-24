@@ -38,6 +38,13 @@ export function setViewCounter(fn: (data: EventData) => void) {
   viewCounter = fn;
 }
 
+let errorObserver: ((data: EventData) => void) | null = null;
+
+/** The open tap learns of each error that is sent (held-tap.ts). */
+export function setErrorObserver(fn: (data: EventData) => void) {
+  errorObserver = fn;
+}
+
 function applyBeforeSend(event: EventData): EventData | null {
   const hook = getConfig()?.beforeSend;
   if (!hook) return event;
@@ -100,6 +107,8 @@ export function emit(data: EventData, activity = true) {
       return;
     }
   }
+  // Before the error is counted: a crash sends the open tap first.
+  if (type === 'error') errorObserver?.(data);
   incrementSessionCount(type);
   viewCounter?.(data);
   const built: EventData = { log_record_uid: uuid(), ...baseContext(activity), ...data };
