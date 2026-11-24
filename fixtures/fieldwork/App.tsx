@@ -7,8 +7,8 @@ import { Comms } from './src/screens/Comms';
 import { Home } from './src/screens/Home';
 import { More } from './src/screens/More';
 import { Orders } from './src/screens/Orders';
-import { fetchScenario, NO_SCENARIO, runScenario, type Scenario } from './src/scenario';
-import { type TelemetryProvider as Provider } from './src/config';
+import { fetchScenario, NO_SCENARIO, reportReady, runScenario, type Scenario } from './src/scenario';
+import { setSdkSettings, type TelemetryProvider as Provider } from './src/config';
 import { currentProvider, setReferenceFirst, setProvider, telemetry } from './src/telemetry';
 import { setReferenceDebug } from './src/telemetry/reference';
 import { TelemetryProvider } from './src/telemetry/provider';
@@ -34,6 +34,7 @@ export default function App() {
         setScenario(s);
         setReferenceFirst(s.order === 'reference-first');
         setReferenceDebug(s.debug === true);
+        setSdkSettings(s.settings);
         if (s.provider) setProvider(s.provider);
         setProviderState(currentProvider());
         return telemetry.initialize(true, s.replay);
@@ -49,6 +50,11 @@ export default function App() {
   useEffect(() => {
     if (ready) telemetry.view(`tab-${tab}`, tab);
   }, [ready, tab]);
+
+  // After the first view started: the end of the start time of a launch.
+  useEffect(() => {
+    if (ready) reportReady(scenario);
+  }, [ready, scenario]);
 
   // A scenario run replaces the autopilot, so that each run sends only
   // the events its checks look for.

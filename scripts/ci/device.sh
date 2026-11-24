@@ -27,6 +27,25 @@ if [ "$PLATFORM" = android ]; then
     adb shell cat "/proc/$pid/stat" 2> /dev/null | tr -d '\r' |
       awk -v t="${tck:-100}" '{ sub(/^.*\) /, ""); print int(($12 + $13) * 1000 / t) }'
   }
+  # CPU time of the main thread and the React Native JS thread so far, in
+  # ms, as JSON: { main, js }. The work that users feel as jank is on
+  # these two threads; cpu_ms counts every thread. A value is null when the
+  # thread is not found.
+  thread_cpu_json() {
+    local pid="$1" tck
+    tck=$(adb shell getconf CLK_TCK 2> /dev/null | tr -d '\r')
+    adb shell "cat /proc/$pid/task/*/stat" 2> /dev/null | tr -d '\r' |
+      awk -v t="${tck:-100}" -v pid="$pid" '
+        {
+          name = $0; sub(/^[^(]*\(/, "", name); sub(/\).*$/, "", name)
+          rest = $0; sub(/^.*\) /, "", rest); split(rest, f, " ")
+          ms = (f[12] + f[13]) * 1000 / t
+          if ($1 == pid) { main = ms; m = 1 }
+          # mqt_js before the new architecture, mqt_v_js with it.
+          else if (name ~ /^mqt_(v_)?js$/) { js += ms; j = 1 }
+        }
+        END { printf "{\"main\":%s,\"js\":%s}", m ? int(main) : "null", j ? int(js) : "null" }'
+  }
   # Memory of the app process, in KB (PSS).
   mem_kb() {
     adb shell dumpsys meminfo "$PKG" 2> /dev/null | tr -d '\r' |
@@ -72,6 +91,15 @@ else
       n = split($1, a, /:/); s = 0
       for (i = 1; i <= n; i++) s = s * 60 + a[i]
       print int(s * 1000) }'
+  }
+  # ps -M lists the main thread first. The JS thread has no name that ps
+  # shows, so it is not measured.
+  thread_cpu_json() {
+    ps -M -p "$1" 2> /dev/null | awk 'NR == 2 {
+      ms = 0
+      for (c = 7; c <= 8; c++) { n = split($c, a, /:/); s = 0; for (i = 1; i <= n; i++) s = s * 60 + a[i]; ms += s * 1000 }
+      main = int(ms) }
+      END { printf "{\"main\":%s,\"js\":null}", (NR >= 2 ? main : "null") }'
   }
   mem_kb() { ps -o rss= -p "$(app_pid)" 2> /dev/null | tr -d ' '; }
   # The simulator renders on the host GPU: its frames are not measured.

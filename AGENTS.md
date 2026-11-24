@@ -226,10 +226,15 @@ and replay, so one build serves every run.
   while the app is in the background, where the JS thread is paused, not
   blocked.
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
-  and device; `cost.mjs` reports CPU, memory, start time, frames, bytes
-  and requests against the launches with no SDK. Every measure comes from outside the
-  app (`scripts/ci/device.sh`). CI emulators render in software, so
-  measure frames and start time on a real device before you quote them.
+  and device, with the settings that each SDK ships with
+  (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI
+  checks. `cost.mjs` reports CPU (all threads, the main thread, the JS
+  thread), memory, start time, frames, bytes and requests, with the
+  difference from the launches with no SDK in each round and its range.
+  Every measure comes from outside the app (`scripts/ci/device.sh`; the
+  time to ready is the time of the app's calls to the mock collector).
+  CI emulators render in software, so measure frames and start time on a
+  real device before you quote them.
 
 The `Replay probe` workflow (`scripts/ci/reference-replay-probe.sh`, each
 week and on request) checks if the Session Replay of the reference SDK

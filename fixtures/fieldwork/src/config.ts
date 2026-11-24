@@ -6,6 +6,20 @@ export type TelemetryProvider = 'none' | 'oodle' | 'reference' | 'both';
 export const telemetryProvider: TelemetryProvider = fixtureEnv.provider;
 export const autopilot: boolean = fixtureEnv.autopilot;
 
+/**
+ * The upload and log settings of both SDKs. `ci` (the default): small,
+ * frequent uploads and the Oodle debug log, so the CI checks find the data
+ * fast. `shipped`: the defaults of each SDK, as an app ships them. The
+ * cost runs (scripts/compare/cost.sh) use them, so they measure what an
+ * app pays. A scenario sets them before the SDKs start.
+ */
+export type SdkSettings = 'ci' | 'shipped';
+let sdkSettings: SdkSettings = 'ci';
+export function setSdkSettings(value: SdkSettings) {
+  sdkSettings = value;
+}
+export const shippedSettings = () => sdkSettings === 'shipped';
+
 // The CI mock collector runs on the host. The Android emulator reaches the
 // host at 10.0.2.2; the iOS simulator shares its network.
 const host = Platform.OS === 'android' ? '10.0.2.2' : 'localhost';

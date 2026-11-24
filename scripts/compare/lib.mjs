@@ -91,6 +91,27 @@ export function readReplay(out) {
 }
 
 export const readLaunches = (out) => readNdjson(path.join(out, 'launches.ndjson'));
+
+/**
+ * The start times of each launch, by the clock of the mock collector
+ * (fixture.ndjson), as a map from the scenario name: from the time that
+ * CI set the scenario to the app's read of it (js_ms: the JS of the app
+ * runs) and to the app's ready call (ready_ms: the SDKs and the first
+ * view started).
+ */
+export function readLaunchTimes(out) {
+  const times = new Map();
+  for (const r of readNdjson(path.join(out, 'fixture.ndjson'))) {
+    if (r.kind === 'set') {
+      times.set(r.scenario, { set: r.received_ms });
+      continue;
+    }
+    const t = times.get(r.scenario);
+    const key = { read: 'js_ms', ready: 'ready_ms' }[r.kind];
+    if (t && key && t[key] === undefined) t[key] = r.received_ms - t.set;
+  }
+  return times;
+}
 export const readRequests = (out) => readNdjson(path.join(out, 'requests.ndjson'));
 /** The requests that the stand-in app API got: { scenario, method, path, traceparents }. */
 export const readApiRequests = (out) => readNdjson(path.join(out, 'api-requests.ndjson'));

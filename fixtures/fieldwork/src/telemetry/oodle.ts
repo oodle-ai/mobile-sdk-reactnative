@@ -1,5 +1,5 @@
 import { OodleRum, OodleSessionReplay } from '@oodle-ai/mobile-sdk-reactnative';
-import { apiHost, oodleConfig } from '../config';
+import { apiHost, oodleConfig, shippedSettings } from '../config';
 import type { Telemetry } from './types';
 
 let enabled = false;
@@ -19,8 +19,7 @@ export const oodle: Telemetry = {
       trackingConsent: consent ? 'granted' : 'not-granted',
       allowedTracingUrls: [{ match: apiHost, propagators: ['tracecontext', 'datadog'] }],
       longTaskThresholdMs: 200,
-      flushIntervalMs: 2000,
-      verbosity: 'debug',
+      ...(shippedSettings() ? {} : { flushIntervalMs: 2000, verbosity: 'debug' as const }),
       tags: { 'demo.name': 'fieldwork-one', 'data.synthetic': true },
       sessionReplay: replay && {
         sampleRate: 100,

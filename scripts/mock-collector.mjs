@@ -29,6 +29,12 @@
 //   GET  /fixture/scenario  the app reads what to do at start
 //   POST /fixture/scenario  CI sets the scenario (fixtures/fieldwork/src/scenario.ts).
 //                           Fields that the POST leaves out get their defaults.
+//   GET  /fixture/ready     the app started its SDKs and its first view
+//                           (?name=<scenario>)
+// It writes the time of each of these calls to <out>/fixture.ndjson
+// (kind set, read or ready). The host clock gives the start time of a
+// launch on both platforms: from the scenario set to the app's read
+// (JS runs) and to its ready call (scripts/compare/cost.mjs).
 // While `offline` is true, uploads get a reset connection, as when the
 // device has no network.
 // Usage: node scripts/mock-collector.mjs [--port 4318] [--api-port 4319] [--out .collector]
@@ -54,6 +60,7 @@ const referenceFile = path.join(out, 'reference.ndjson');
 const referenceEventsFile = path.join(out, 'reference-events.ndjson');
 const referenceReplayFile = path.join(out, 'reference-replay.ndjson');
 const spansFile = path.join(out, 'spans.ndjson');
+const fixtureFile = path.join(out, 'fixture.ndjson');
 
 const DEFAULT_SCENARIO = { name: 'none', order: 'oodle-first', offline: false };
 let scenario = DEFAULT_SCENARIO;
@@ -84,10 +91,18 @@ function readBody(req) {
 }
 
 async function handleFixture(req, res) {
+  const now = Date.now();
+  const url = new URL(req.url, 'http://collector');
+  if (url.pathname === '/fixture/ready') {
+    appendLines(fixtureFile, [{ received_ms: now, kind: 'ready', scenario: url.searchParams.get('name') ?? '' }]);
+    res.writeHead(204).end();
+    return;
+  }
   if (req.method === 'POST') {
     scenario = { ...DEFAULT_SCENARIO, ...JSON.parse((await readBody(req)).toString('utf8') || '{}') };
     console.log(`${new Date().toISOString()} scenario ${JSON.stringify(scenario)}`);
   }
+  appendLines(fixtureFile, [{ received_ms: now, kind: req.method === 'POST' ? 'set' : 'read', scenario: scenario.name }]);
   res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify(scenario));
 }
 
@@ -234,7 +249,7 @@ async function handleTraces(req, res) {
 }
 
 const server = http.createServer((req, res) => {
-  const route = req.url.startsWith('/fixture/scenario')
+  const route = req.url.startsWith('/fixture/scenario') || req.url.startsWith('/fixture/ready')
     ? handleFixture
     : req.method !== 'POST'
       ? null
