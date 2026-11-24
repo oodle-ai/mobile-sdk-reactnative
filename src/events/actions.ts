@@ -5,6 +5,8 @@ import { incrTelemetry } from '../core/telemetry';
 import { isOverPrivateArea } from '../replay/recorder';
 import { attributesJSON, emit } from './emit';
 import { fiberFromEvent, resolveTapTarget } from './tap-target';
+import { holdTap } from './held-tap';
+import { isPressTrackingActive } from './press-tracking';
 import { getCurrentViewInfo } from './view-state';
 
 /** Taps on one target within this window count toward a rage tap. */
@@ -47,12 +49,75 @@ export interface TouchPoint {
   t: number;
 }
 
-/** Called by OodleProvider when a touch ends close to where it started. */
-export function recordTap(startEvent: unknown, start: TouchPoint, end: TouchPoint) {
+// --- Taps: a touch that pressed something ---
+
+/**
+ * A press handler and the end of the touch that ran it come within this
+ * time of each other. React Native runs onPress as the touch ends; a
+ * gesture library can run it a little before or after.
+ */
+const PRESS_MATCH_MS = 500;
+
+interface EndedTouch {
+  event: unknown;
+  start: TouchPoint;
+  end: TouchPoint;
+}
+
+/** A touch that ended as a tap, and waits for its press. */
+let waitingTouch: EndedTouch | null = null;
+/** When a press handler ran during the current touch, before it ended. */
+let pressedAt = -Infinity;
+
+function isTapGesture(start: TouchPoint, end: TouchPoint): boolean {
+  return end.t - start.t <= MAX_TAP_MS && Math.hypot(end.x - start.x, end.y - start.y) <= TAP_SLOP_DP;
+}
+
+/** Called by OodleProvider when a touch starts. A press from before it is not its press. */
+export function touchStarted() {
+  waitingTouch = null;
+  pressedAt = -Infinity;
+}
+
+/**
+ * Called by OodleProvider when one finger lifts. The touch is a tap when
+ * it moved little and a press handler ran for it, as in the reference SDK.
+ * Without press tracking (React could not be patched), every such touch
+ * is a tap.
+ */
+export function touchEnded(startEvent: unknown, start: TouchPoint, end: TouchPoint) {
+  waitingTouch = null;
+  if (!isTapGesture(start, end)) return;
+  if (!isPressTrackingActive() || pressedAt >= start.t) {
+    // React Native runs onPress before the touch ends: the tap happened at
+    // the press, and an error that its handler sent at once is in its window.
+    const at = pressedAt >= start.t ? Math.min(pressedAt, end.t) : end.t;
+    pressedAt = -Infinity;
+    recordTap(startEvent, start, end, at);
+    return;
+  }
+  waitingTouch = { event: startEvent, start, end };
+}
+
+/** Called when a press handler runs (press-tracking.ts). */
+export function pressed() {
+  const now = Date.now();
+  const touch = waitingTouch;
+  if (touch && now - touch.end.t <= PRESS_MATCH_MS) {
+    // Nested controls each run a wrapped handler for one press: the first
+    // takes the touch, and the rest find none.
+    waitingTouch = null;
+    recordTap(touch.event, touch.start, touch.end);
+    return;
+  }
+  pressedAt = now;
+}
+
+/** Records a tap on what the touch hit, at `at` (the end of the touch by default). Exported for tests. */
+export function recordTap(startEvent: unknown, start: TouchPoint, end: TouchPoint, at = end.t) {
   const config = getConfig();
   if (!config?.trackInteractions) return;
-  if (end.t - start.t > MAX_TAP_MS) return;
-  if (Math.hypot(end.x - start.x, end.y - start.y) > TAP_SLOP_DP) return;
+  if (!isTapGesture(start, end)) return;
   let target;
   try {
     const fiber = fiberFromEvent(startEvent);
@@ -85,7 +150,8 @@ export function recordTap(startEvent: unknown, start: TouchPoint, end: TouchPoin
     base.app_screen_coordinate_x = Math.round(end.x);
     base.app_screen_coordinate_y = Math.round(end.y);
   }
-  emit({ ...base, action_id: uuid(), action_name: target.name, action_type: 'tap', is_frustration: 0 });
+  // Held for the error tap window, then sent with its own time.
+  holdTap({ ...base, action_id: uuid(), action_name: target.name, action_type: 'tap', is_frustration: 0 }, at);
   const view = getCurrentViewInfo();
   if (trackRage(`${view?.id ?? ''}:${target.name}`, end.t)) {
     emit({

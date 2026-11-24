@@ -179,6 +179,16 @@ function px(n: number): string {
   return `${Math.round(n * 10) / 10}px`;
 }
 
+/**
+ * True when a text without the device's lines has a box that holds one
+ * line, and no line break of its own: the device drew it on one line.
+ */
+function isOneLine(w: Wireframe): boolean {
+  if (w.tx?.includes('\n')) return false;
+  const lineHeight = w.lh ?? (w.fs ?? 14) * 1.2;
+  return w.h < lineHeight * 1.5;
+}
+
 function maskText(s: string): string {
   return s.replace(/[^\s]/g, 'x');
 }
@@ -274,10 +284,12 @@ export function styleFor(w: Wireframe): string {
       `line-height:${w.lh ? px(w.lh) : '1.2'}`,
     );
     if (w.ls) parts.push(`letter-spacing:${px(w.ls)}`);
-    if (w.ln && w.k === 't') {
+    if (w.k === 't' && (w.ln || isOneLine(w))) {
       // The device's lines, as it drew them. The browser's font is a
       // little wider or narrower, so a line may overhang its box; a clip
-      // would cut its last letters ("Offic").
+      // would cut its last letters ("Offic"). A box that holds one line
+      // is drawn the same way: wrapped again, its last word went to a
+      // second line below the box ("My shift" showed as "My").
       parts.push('white-space:pre', 'overflow:visible');
     } else {
       parts.push('white-space:pre-wrap', 'overflow:hidden', 'word-break:break-word');

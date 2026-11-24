@@ -271,6 +271,19 @@ final class WireframeWalker {
       if !text.isEmpty {
         n["tx"] = text
         textStyle(&n, color: label.textColor, font: label.font, alignment: label.textAlignment)
+        // The device's lines, as for a paragraph: wrapped again in the
+        // replay's wider font, a header title lost its last word ("My
+        // shift" showed as "My"). A one-line label truncates on the
+        // device and never wraps, so its text is its one line.
+        if label.numberOfLines == 1 {
+          n["ln"] = true
+          n["lh"] = round(Double(label.font.lineHeight))
+        } else if let attributed = label.attributedText, attributed.length > 0,
+                  let laid = cachedDeviceLines(view, attributed, size: view.bounds.size) {
+          n["tx"] = laid.lines
+          n["ln"] = true
+          n["lh"] = round(Double(laid.lineHeight))
+        }
         if let privacy = privacy { n["pv"] = privacy }
       }
       return n

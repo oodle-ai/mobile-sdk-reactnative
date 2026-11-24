@@ -1,5 +1,32 @@
 # Changelog
 
+## Unreleased
+
+### Changes that alter the counts
+
+- A touch is a tap only when it runs a press handler (`onPress`,
+  `onLongPress` or `onValueChange`), as in the reference SDK. The SDK
+  wraps these props of the elements that React creates. Before, each
+  short touch that did not move was a tap, also a touch that only stopped
+  a scrolling list. Call `OodleRum.init()` (or render `OodleProvider`)
+  before the app renders its screens: an element made before init() is
+  tracked only after it renders again.
+- An error within 100 ms of a tap makes the tap an error tap, as in the
+  reference SDK: the tap has `is_frustration: 1` and
+  `action_frustration_types: "error_tap"`. It still counts as an action of
+  its view. An error that the press handler sends at once counts too. A
+  tap is sent 100 ms after it happens, with the time it happened, or at
+  once when the screen changes, the app goes to the background or a crash
+  occurs.
+
+### Session Replay
+
+- A text that is one line high is drawn on one line. The replay draws
+  text in a browser font that is wider than the app's, and a header title
+  wrapped to a second line below its box ("My shift" showed as "My"). On
+  iOS, a `UILabel` (a native header title) now sends its lines as the
+  device drew them, as React Native text already did.
+
 ## 0.1.5
 
 ### Changes that alter the counts
