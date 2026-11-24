@@ -7,3 +7,4 @@ android/.cxx/
 ios/build/
 .collector/
 .DS_Store
+.claude/

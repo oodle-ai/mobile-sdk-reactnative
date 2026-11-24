@@ -17,6 +17,7 @@
 //                                                 the scenario
 //                    <out>/reference-events.ndjson  one reference SDK RUM event per line
 //   /reference/replay  <out>/reference-replay.ndjson  one Session Replay segment per line
+// It stores a reference SDK upload with the same decoded bytes only once.
 // With --api-port it also serves a stand-in app API that answers every
 // request with an empty JSON list. It has its own port, because the SDK
 // does not record requests to the collector itself. It writes each request
@@ -31,6 +32,7 @@
 // While `offline` is true, uploads get a reset connection, as when the
 // device has no network.
 // Usage: node scripts/mock-collector.mjs [--port 4318] [--api-port 4319] [--out .collector]
+import crypto from 'node:crypto';
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,6 +59,8 @@ const DEFAULT_SCENARIO = { name: 'none', order: 'oodle-first', offline: false };
 let scenario = DEFAULT_SCENARIO;
 /** The X-Oodle-Batch-Id of each body stored. */
 const seenBatches = new Set();
+/** The kind and SHA-256 of the decoded body of each reference SDK upload stored. */
+const seenReferenceUploads = new Set();
 
 const appendLines = (file, rows) => {
   if (rows.length) fs.appendFileSync(file, rows.map((r) => JSON.stringify(r)).join('\n') + '\n');
@@ -91,7 +95,21 @@ async function handleReference(req, res) {
   const raw = await readBody(req);
   const now = Date.now();
   const body = decompress(raw, req.headers['content-encoding']);
-  if (req.url.startsWith('/reference/replay')) {
+  // The reference SDK also sends an upload again when it lost the answer
+  // (iOS suspended the app while it waited), and the next launch sends the
+  // same bytes. Its collector stores such an upload once, so this one does
+  // too: a second copy is answered and logged, and not stored. An upload
+  // with other bytes is stored, so other duplicates still fail the checks.
+  const kind = req.url.startsWith('/reference/replay') ? 'replay' : 'rum';
+  const digest = `${kind}:${crypto.createHash('sha256').update(body).digest('hex')}`;
+  if (seenReferenceUploads.has(digest)) {
+    logRequest({ sdk: 'reference', kind, raw_bytes: raw.length, decoded_bytes: body.length, duplicate: true });
+    console.log(`${new Date().toISOString()} reference ${kind} upload again, not stored (${scenario.name})`);
+    res.writeHead(202).end();
+    return;
+  }
+  seenReferenceUploads.add(digest);
+  if (kind === 'replay') {
     const segments = parseReferenceReplay(body, req.headers['content-type']);
     appendLines(referenceReplayFile, segments.map((s) => ({ scenario: scenario.name, ...s })));
     logRequest({ sdk: 'reference', kind: 'replay', raw_bytes: raw.length, decoded_bytes: body.length, segments: segments.length });
