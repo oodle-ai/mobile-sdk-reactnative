@@ -44,7 +44,10 @@ reads it as any OTLP trace request, so it is not in
 - A span is sent only for a trace that Oodle started, or that the
   reference SDK started when both run (that SDK sends its span to its own
   backend). A `traceparent` that the app set comes from the app's own
-  tracer, which sends that span; a second one would be a duplicate.
+  tracer, which sends that span; a second one would be a duplicate. The
+  reference SDK's XHR tracking marks the XHR (`_datadog_xhr`); its fetch
+  tracking, which wraps Oodle's fetch, is known by its
+  `x-datadog-origin: rum` header in the call.
 - Spans are queued under `SPANS_BATCH_KEY` and flushed as a body of their
   own (`buildTraceBody`), with the same retries, batch id and outbox as
   the envelope. A body in the outbox keeps its path. The collector stores
