@@ -17,6 +17,10 @@ interface Trace {
 
 const NO_TRACE: Trace = { traceId: '', spanId: '', client: false };
 
+/** The header and value that a RUM SDK's Datadog propagator adds to a request it traces. */
+const ORIGIN_HEADER = 'x-datadog-origin';
+const ORIGIN_RUM = 'rum';
+
 interface TrackedXHR {
   [INTERNAL_REQUEST]?: boolean;
   /** The XHR of a fetch call, which the fetch wrapper records. */
@@ -271,7 +275,13 @@ function traceRequest(
   const existing = headers.get('traceparent');
   if (existing !== undefined) {
     const parent = parseTraceparent(existing);
-    return parent?.sampled ? { traceId: parent.traceId, spanId: parent.spanId, client: false } : NO_TRACE;
+    if (!parent?.sampled) return NO_TRACE;
+    // The reference SDK's fetch tracking wraps Oodle's fetch when it is set
+    // up after Oodle, so its trace headers are already in the call. Its RUM
+    // origin header tells them from the app's own tracer: the reference SDK
+    // sends its client span to its own backend, so Oodle sends one with the
+    // same ids. A traceparent that the app set gets no span.
+    return { traceId: parent.traceId, spanId: parent.spanId, client: headers.get(ORIGIN_HEADER) === ORIGIN_RUM };
   }
   const rule = config?.tracingUrls.find((r) => r.test(url));
   if (!config || !rule) return NO_TRACE;

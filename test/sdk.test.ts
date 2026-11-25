@@ -480,6 +480,36 @@ describe('OodleRum end to end', () => {
     expect(events('error').find((e) => e.error_source === 'network')).toBeDefined();
   });
 
+  // The reference SDK's fetch tracking (FetchProxy), set up after Oodle, wraps
+  // Oodle's fetch and puts its trace headers in the call. Expo's native fetch
+  // does not run on XHR, so Oodle sees them only there.
+  it('sends a client span for a fetch that the reference SDK traces, and none for a traceparent the app set', async () => {
+    const oodleFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
+    const referenceFetch = (input: unknown, init?: { headers?: Record<string, string> }) =>
+      oodleFetch(input, {
+        ...init,
+        headers: { ...(init?.headers ?? {}), traceparent: REF_TRACEPARENT, 'x-datadog-origin': 'rum' },
+      });
+    const traced = referenceFetch('https://api.fieldwork.test/api/trpc/diagnostics.probe?input=1');
+    const own = oodleFetch('https://api.fieldwork.test/api/fetch-app-traced', {
+      headers: { traceparent: '00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01' },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    await Promise.all([traced, own]);
+    await settle();
+
+    const sent = fetchCalls.find((c) => c.url.includes('diagnostics.probe'))!;
+    // One traceparent: the reference SDK's, which Oodle keeps.
+    expect(sent.headers.traceparent).toBe(REF_TRACEPARENT);
+    const res = events('resource').find((r) => String(r.url_full).includes('diagnostics.probe'))!;
+    expect(res).toMatchObject({ resource_type: 'fetch', trace_id: REF_TRACE, span_id: 'cae6ce09b5150042' });
+    const span = clientSpans().find((s) => spanAttr(s.span, 'url.path') === '/api/trpc/diagnostics.probe');
+    expect(span?.span).toMatchObject({ traceId: REF_TRACE, spanId: 'cae6ce09b5150042', kind: 3 });
+    expect(spanAttr(span!.span, 'session.id')).toBe(res.session_id);
+    // The app's own tracer sends the span of a traceparent that the app set.
+    expect(clientSpans().find((s) => s.span.traceId === '0af7651916cd43dd8448eb211c80319c')).toBeUndefined();
+  });
+
   it('records fetch calls once, with trace headers', async () => {
     const appFetch = (globalThis as unknown as { fetch: typeof fakeFetch }).fetch;
     const pending = appFetch('https://api.fieldwork.test/api/trpc/workflow.execute?batch=1', {

@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.6
 
 ### Uploads
 
@@ -39,6 +39,18 @@
   wrapped to a second line below its box ("My shift" showed as "My"). On
   iOS, a `UILabel` (a native header title) now sends its lines as the
   device drew them, as React Native text already did.
+
+### Tracing
+
+- With the reference SDK's fetch tracking on and both SDKs running, a
+  `fetch` request now gets a client span in Oodle. The reference SDK,
+  set up after Oodle, wraps Oodle's fetch and puts its trace headers in
+  the call, and Oodle took them for headers that the app set. Its trace in
+  Oodle then started at the backend, with no app span and no
+  `session.id`. Expo's native fetch does not run on XHR, so this was each
+  `fetch` call in an Expo app. Oodle now knows the reference SDK's headers
+  by their `x-datadog-origin: rum` header. A `traceparent` that the app
+  set still gets no span.
 
 ## 0.1.5
 
