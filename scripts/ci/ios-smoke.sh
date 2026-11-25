@@ -30,16 +30,21 @@ sleep 30
 # Another app in front sends the fixture to the background.
 xcrun simctl launch "$DEVICE" com.apple.Preferences
 sleep 15
-if ! xcrun simctl spawn "$DEVICE" launchctl list | grep -q "$BUNDLE"; then
+# Read the whole service list before it is searched. With pipefail, a
+# `grep -q` or `head` that stops reading early ends launchctl with
+# SIGPIPE, and the pipe fails although the app was found.
+SERVICES=$(xcrun simctl spawn "$DEVICE" launchctl list)
+if ! grep -q "$BUNDLE" <<< "$SERVICES"; then
   echo "The app process is gone."
   exit 1
 fi
 # Simulator apps are processes of the host. A sample of the app in the
 # background shows what its threads wait on, for a run where the
 # background events do not arrive.
-PID=$(xcrun simctl spawn "$DEVICE" launchctl list | awk -v b="$BUNDLE" 'index($3, b) && $1 != "-" { print $1 }' | head -1)
+PID=$(awk -v b="$BUNDLE" 'index($3, b) && $1 != "-" { print $1; exit }' <<< "$SERVICES")
 if [ -n "$PID" ]; then sample "$PID" 3 -file "$OUT/background-sample.txt" > /dev/null 2>&1 || true; fi
-if ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q OodleExample; then
+# grep reads all of the list (no -q), so ls does not get SIGPIPE.
+if ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep OodleExample > /dev/null; then
   echo "The app left a crash report."
   exit 1
 fi
