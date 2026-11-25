@@ -4,6 +4,22 @@ import { telemetry } from './telemetry';
 
 const TABS: Tab[] = ['Home', 'Orders', 'Comms', 'More'];
 
+/**
+ * The time that each walk blocks the JS thread. It is two times the long
+ * task threshold that the fixture gives both SDKs (200 ms), so a tracker
+ * that samples the thread at an interval still measures more than the
+ * threshold. scripts/compare/parity.mjs requires a long task of this block.
+ */
+const FORCED_BLOCK_MS = 400;
+
+/** Keeps the JS thread busy for `ms`, as a slow render or a large parse does. */
+function blockJsThread(ms: number) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // Busy on purpose: a timer or an await gives the thread back.
+  }
+}
+
 /** A small seeded random number generator (mulberry32), so a seed always gives the same walk. */
 function random(seed: number): () => number {
   let a = seed >>> 0;
@@ -25,8 +41,10 @@ function random(seed: number): () => number {
  *
  * It sends "scenario:<name>" first and "soak:done:<name>" last, so the
  * checks can find the session of the launch and see that the walk ended.
- * The walk runs the same with no SDK, so the cost runs measure each SDK
- * against the same work.
+ * After the steps, it sends "soak:long-task:<name>" and then blocks the JS
+ * thread for FORCED_BLOCK_MS, so the checks know when a long task must
+ * start. The walk runs the same with no SDK, so the cost runs measure each
+ * SDK against the same work.
  */
 export function runSoak(name: string, seed: number, steps: number, go: (tab: Tab) => void): () => void {
   let stopped = false;
@@ -54,6 +72,8 @@ export function runSoak(name: string, seed: number, steps: number, go: (tab: Tab
       }
     }
     if (stopped) return;
+    telemetry.action(`soak:long-task:${name}`);
+    blockJsThread(FORCED_BLOCK_MS);
     go('Home');
     await wait(1000);
     if (!stopped) telemetry.action(`soak:done:${name}`);

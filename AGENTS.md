@@ -231,7 +231,10 @@ and replay, so one build serves every run.
   reference SDK is not always right: it loses the last view updates of an
   app that is ended in the background, and it reports long tasks on iOS
   while the app is in the background, where the JS thread is paused, not
-  blocked.
+  blocked. Thus `time-spent` compares only closed views, and long tasks
+  are checked on a known block: after its steps, the walk sends
+  `soak:long-task:<name>` and blocks the JS thread for 400 ms, and Oodle
+  must report a long task for it (`forced-long-task`).
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device, with the settings that each SDK ships with
   (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI

@@ -39,6 +39,15 @@ const allowed = (check) =>
   )?.reason;
 
 const SDKS = ['oodle', 'reference'];
+
+// A long task of the forced block in the soak walk: at least this long, so
+// a short long task near the block does not count for it.
+const FORCED_MIN_MS = 300;
+// How far its time can be from the action before the block. An SDK gives
+// a long task the time of its start or of its end, and the block lasts
+// 400 ms.
+const FORCED_WINDOW_MS = 2000;
+
 const events = readEvents(out);
 const replaySegments = readReplay(out);
 const bySession = Object.fromEntries(SDKS.map((sdk) => [sdk, groupBy(events[sdk], (e) => e.session)]));
@@ -129,11 +138,37 @@ for (const launch of launches) {
   check('views-closed', 'info', (ev) => lastViewUpdates(ev).filter((v) => v.active === false).length);
   check('long-tasks', 'info', (ev) => ev.filter((e) => e.type === 'long_task').length);
 
-  // Time on each screen, from the last update of each view. Equal when
-  // within 1 s or 15%.
+  // The walk blocks the JS thread for 400 ms just after the action
+  // "soak:long-task:<launch>" (fixtures/fieldwork/src/soak.ts). Each SDK
+  // must report a long task for it. Other long tasks do not tell which SDK
+  // is right: the reference SDK also reports the JS thread paused in the
+  // background on iOS, and blocks near the threshold give either result.
+  const [oodleForced, referenceForced] = per((ev) => {
+    const mark = ev.find((e) => e.type === 'action' && e.name === `soak:long-task:${launch}`);
+    if (!mark) return 'no mark';
+    const hit = ev.some(
+      (e) => e.type === 'long_task' && (e.duration_ms ?? 0) >= FORCED_MIN_MS && Math.abs(e.ts - mark.ts) <= FORCED_WINDOW_MS,
+    );
+    return hit ? 'reported' : 'none';
+  });
+  compare('forced-long-task', 'must', launch, oodleForced, 'reported', oodleForced === 'reported', ['Oodle', 'expected']);
+  compare('forced-long-task (reference)', 'info', launch, referenceForced, 'reported', referenceForced === 'reported', [
+    'reference',
+    'expected',
+  ]);
+
+  // Time on each screen, from the last update of each closed view. Equal
+  // when within 1 s or 15%. A view that is still open at the end of the
+  // launch has the time of the last update that each SDK sent before the
+  // app was ended or paused. That time tells when the SDK sent, not how
+  // long the screen was on, and the reference SDK loses the last updates
+  // of an app ended in the background.
   const [oodleTime, referenceTime] = per((ev) => {
     const t = {};
-    for (const v of lastViewUpdates(ev)) t[v.screen] = (t[v.screen] ?? 0) + (v.time_spent_ms ?? 0);
+    for (const v of lastViewUpdates(ev)) {
+      if (v.active !== false) continue;
+      t[v.screen] = (t[v.screen] ?? 0) + (v.time_spent_ms ?? 0);
+    }
     return t;
   });
   const screens = [...new Set([...Object.keys(oodleTime), ...Object.keys(referenceTime)])].sort();

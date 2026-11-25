@@ -9,7 +9,8 @@ import { readNdjson } from '../ci/collector-lib.mjs';
  *   sdk, id (unique per event; a view update is one event), type
  *   (view|action|error|resource|long_task|...), session, view, screen,
  *   seq and active (view updates), action_type, name (action name or error
- *   message), error_source, is_crash, url, time_spent_ms, ts (ms).
+ *   message), error_source, is_crash, url, time_spent_ms, duration_ms
+ *   (long tasks), ts (ms).
  */
 export function fromOodle(e) {
   const type = e.event_type;
@@ -29,6 +30,7 @@ export function fromOodle(e) {
     url: e.url_full,
     trace: e.trace_id,
     time_spent_ms: e.view_time_spent_ms,
+    duration_ms: e.long_task_duration_ms,
     ts: Date.parse(e.timestamp),
   };
 }
@@ -49,6 +51,8 @@ export function fromReference(e) {
     view: e.view?.id,
     screen: e.view?.name,
     seq: e._dd?.document_version,
+    // A `view_update` has only the fields that changed (lastViewUpdates).
+    partial: e.type === 'view_update' ? true : undefined,
     active: e.view?.is_active,
     action_type: e.action?.type,
     name: type === 'action' ? e.action?.target?.name : type === 'error' ? e.error?.message : undefined,
@@ -57,6 +61,7 @@ export function fromReference(e) {
     url: e.resource?.url,
     // The reference SDK sends durations in nanoseconds.
     time_spent_ms: typeof e.view?.time_spent === 'number' ? e.view.time_spent / 1e6 : undefined,
+    duration_ms: typeof e.long_task?.duration === 'number' ? e.long_task.duration / 1e6 : undefined,
     ts: Number(e.date),
   };
 }
@@ -128,25 +133,29 @@ export function groupBy(list, key) {
 }
 
 /**
- * The last state of each view: the fields of its highest update, and for
- * a field that update does not have (a partial `view_update`), the value
- * of the update before it.
+ * The last state of each view: each field has its value from the highest
+ * update that has the field. A partial `view_update` has only the fields
+ * that changed, so a field that it does not have keeps its value from a
+ * lower update. The reference Android SDK can send one update in both
+ * forms. Then the partial form comes last, because it has only the values
+ * that changed.
+ *
+ * The updates are applied in order of their number, not in the order in
+ * which they arrived. A merge in the order of arrival let the value of a
+ * lower update replace the value of a full update with the same number
+ * that arrived after it.
  */
 export function lastViewUpdates(events) {
-  const last = new Map();
-  for (const e of events) {
-    if (e.type !== 'view') continue;
-    const prev = last.get(e.view);
-    if (!prev) {
-      last.set(e.view, e);
-      continue;
-    }
-    const [older, newer] = (e.seq ?? 0) > (prev.seq ?? 0) ? [prev, e] : [e, prev];
-    const merged = { ...older };
-    for (const [k, v] of Object.entries(newer)) if (v !== undefined) merged[k] = v;
-    last.set(e.view, merged);
-  }
-  return [...last.values()];
+  const byView = groupBy(
+    events.filter((e) => e.type === 'view'),
+    (e) => e.view,
+  );
+  return [...byView.values()].map((updates) => {
+    const ordered = [...updates].sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0) || Number(Boolean(a.partial)) - Number(Boolean(b.partial)));
+    const merged = {};
+    for (const u of ordered) for (const [k, v] of Object.entries(u)) if (v !== undefined) merged[k] = v;
+    return merged;
+  });
 }
 
 /** The p-th percentile (0 to 100) of a list of numbers. */
