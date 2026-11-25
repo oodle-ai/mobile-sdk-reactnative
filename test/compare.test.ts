@@ -113,6 +113,22 @@ describe('the reference SDK view updates', () => {
     expect(last).toMatchObject({ screen: 'Home', seq: 3, time_spent_ms: 5000, active: false });
   });
 
+  it('keeps the value of a full update when a partial update of the same number has no such field', () => {
+    // The closing update in both forms: the partial form has only the
+    // changed fields (no time_spent), and the full form has all of them.
+    const events = [
+      view(2, { time_spent: 1 }),
+      update(4, { time_spent: 22e6 }),
+      view(4, { time_spent: 22e6 }),
+      update(10, { is_active: false, long_task: { count: 1 } }),
+      view(10, { time_spent: 2366e6, is_active: false }),
+    ].map(fromReference);
+    for (const order of [events, [...events].reverse()]) {
+      const [last] = lastViewUpdates(order);
+      expect(last).toMatchObject({ seq: 10, time_spent_ms: 2366, active: false });
+    }
+  });
+
   it('still finds a view_update that arrives twice', () => {
     const events = [view(1), update(2, { time_spent: 3e9 }), update(2, { time_spent: 3e9 })].map(fromReference);
     expect(new Set(events.map((e) => e.id)).size).toBe(2);
