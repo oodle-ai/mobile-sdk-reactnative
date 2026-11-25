@@ -1,6 +1,6 @@
 {
   "name": "@oodle-ai/mobile-sdk-reactnative",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Oodle Real User Monitoring SDK for React Native",
   "keywords": [
     "react-native",
