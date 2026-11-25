@@ -194,10 +194,18 @@ async function startCollector(out: string) {
 
 type Step = { kind: 'action' | 'error' | 'request'; name: string };
 
+/**
+ * How a launch ends in the data of one SDK: `longTaskMs` is the long task
+ * that it reported for the forced block (0: none), and `openViewMs` the
+ * time of a last view that is still open (undefined: no such view).
+ */
+type LaunchEnd = { longTaskMs?: number; openViewMs?: number };
+
 /** One launch of a soak walk, as each SDK reports it. */
-function oodleLaunch(launch: string, session: string, steps: Step[], t0: number) {
+function oodleLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
+  const { longTaskMs = 380, openViewMs } = end;
   let n = 0;
-  const base = () => ({ log_record_uid: `${session}-${n++}`, session_id: session, view_id: `${session}-v`, app_screen_name: 'Home', timestamp: new Date(t0 + n * 100).toISOString() });
+  const base = (viewId = `${session}-v`) => ({ log_record_uid: `${session}-${n++}`, session_id: session, view_id: viewId, app_screen_name: 'Home', timestamp: new Date(t0 + n * 100).toISOString() });
   const view = (seq: number, active: boolean) => ({ ...base(), event_type: 'view', view_update_seq: seq, view_is_new: seq === 1 ? 1 : 0, view_is_active: active ? 1 : 0, view_time_spent_ms: seq * 2000 });
   const events: object[] = [view(1, true), { ...base(), event_type: 'action', action_type: 'custom', action_name: `scenario:${launch}` }];
   for (const s of steps) {
@@ -205,11 +213,17 @@ function oodleLaunch(launch: string, session: string, steps: Step[], t0: number)
     if (s.kind === 'error') events.push({ ...base(), event_type: 'error', error_source: 'custom', error_is_crash: 0, exception_message: s.name });
     if (s.kind === 'request') events.push({ ...base(), event_type: 'resource', url_full: `${API}/${s.name}` });
   }
+  events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:long-task:${launch}` });
+  if (longTaskMs) events.push({ ...base(), event_type: 'long_task', long_task_duration_ms: longTaskMs });
   events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:done:${launch}` }, view(2, false));
+  if (openViewMs !== undefined) {
+    events.push({ ...base(`${session}-v2`), event_type: 'view', view_update_seq: 1, view_is_new: 1, view_is_active: 1, view_time_spent_ms: openViewMs });
+  }
   return events;
 }
 
-function referenceLaunch(launch: string, session: string, steps: Step[], t0: number) {
+function referenceLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
+  const { longTaskMs = 400, openViewMs } = end;
   let n = 0;
   const base = () => ({ date: t0 + ++n * 100, session: { id: session }, view: { id: `${session}-v`, name: 'Home' } });
   const view = (version: number, active: boolean) => ({ ...base(), type: 'view', _dd: { document_version: version }, view: { id: `${session}-v`, name: 'Home', is_active: active, time_spent: version * 2e9 } });
@@ -220,7 +234,13 @@ function referenceLaunch(launch: string, session: string, steps: Step[], t0: num
     if (s.kind === 'error') events.push({ ...base(), type: 'error', error: { id: `${session}-e${n}`, source: 'custom', is_crash: false, message: s.name } });
     if (s.kind === 'request') events.push({ ...base(), type: 'resource', resource: { id: `${session}-r${n}`, url: `${API}/${s.name}?seed=1` } });
   }
+  events.push(action(`soak:long-task:${launch}`));
+  // The reference SDK sends durations in nanoseconds.
+  if (longTaskMs) events.push({ ...base(), type: 'long_task', long_task: { id: `${session}-l${n}`, duration: longTaskMs * 1e6 } });
   events.push(action(`soak:done:${launch}`), view(2, false));
+  if (openViewMs !== undefined) {
+    events.push({ ...base(), type: 'view', _dd: { document_version: 1 }, view: { id: `${session}-v2`, name: 'Home', is_active: true, time_spent: openViewMs * 1e6 } });
+  }
   return events;
 }
 
@@ -245,16 +265,16 @@ describe('comparison scripts', () => {
     return d;
   };
 
-  async function bothRun(referenceSteps: Step[]) {
+  async function bothRun(referenceSteps: Step[], oodleEnd: LaunchEnd = {}, referenceEnd: LaunchEnd = {}) {
     const out = tmp();
     const c = await startCollector(out);
     const launch = 'soak-both-on-r1-1';
     await c.scenario({ name: launch, provider: 'both' });
     const t0 = Date.now() - 5000;
-    expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0), [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 4 }, { type: 2 }] }], 'batch-1')).toBe(202);
+    expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, oodleEnd), [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 4 }, { type: 2 }] }], 'batch-1')).toBe(202);
     // A body sent again with its batch id is stored once.
-    expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0), [], 'batch-1')).toBe(202);
-    expect(await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0))).toBe(202);
+    expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, oodleEnd), [], 'batch-1')).toBe(202);
+    expect(await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0, referenceEnd))).toBe(202);
     expect(await c.referenceReplay('ref-1')).toBe(202);
     fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900).replace(/soak-both-on-r1-1/, launch) + '\n');
     return out;
@@ -321,6 +341,31 @@ describe('comparison scripts', () => {
     const r = run('parity.mjs', out, '--replay', 'on');
     expect(r.stdout).toMatch(/FAIL trace-link: differs in 1 of 1/);
     expect(r.status).toBe(1);
+  });
+
+  it('compares time spent on closed views only', async () => {
+    // The last view is still open. Its time is the time of each SDK's last
+    // update, so a large difference there is not a difference in the data.
+    const out = await bothRun(STEPS, { openViewMs: 20_000 }, { openViewMs: 1000 });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/ok {3}time-spent: differs in 0 of 1/);
+    expect(r.status).toBe(0);
+  });
+
+  it('fails when Oodle reports no long task for the forced block', async () => {
+    // A long task that is too short is not the forced block.
+    const out = await bothRun(STEPS, { longTaskMs: 210 });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL forced-long-task: differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  it('reports, and does not fail on, a forced block that the reference SDK missed', async () => {
+    const out = await bothRun(STEPS, {}, { longTaskMs: 0 });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/diff forced-long-task \(reference\): differs in 1 of 1/);
+    expect(r.stdout).toMatch(/ok {3}forced-long-task: differs in 0 of 1/);
+    expect(r.status).toBe(0);
   });
 
   it('fails when one SDK lost an action', async () => {

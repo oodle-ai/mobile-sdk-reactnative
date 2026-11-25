@@ -9,7 +9,8 @@ import { readNdjson } from '../ci/collector-lib.mjs';
  *   sdk, id (unique per event; a view update is one event), type
  *   (view|action|error|resource|long_task|...), session, view, screen,
  *   seq and active (view updates), action_type, name (action name or error
- *   message), error_source, is_crash, url, time_spent_ms, ts (ms).
+ *   message), error_source, is_crash, url, time_spent_ms, duration_ms
+ *   (long tasks), ts (ms).
  */
 export function fromOodle(e) {
   const type = e.event_type;
@@ -29,6 +30,7 @@ export function fromOodle(e) {
     url: e.url_full,
     trace: e.trace_id,
     time_spent_ms: e.view_time_spent_ms,
+    duration_ms: e.long_task_duration_ms,
     ts: Date.parse(e.timestamp),
   };
 }
@@ -57,6 +59,7 @@ export function fromReference(e) {
     url: e.resource?.url,
     // The reference SDK sends durations in nanoseconds.
     time_spent_ms: typeof e.view?.time_spent === 'number' ? e.view.time_spent / 1e6 : undefined,
+    duration_ms: typeof e.long_task?.duration === 'number' ? e.long_task.duration / 1e6 : undefined,
     ts: Number(e.date),
   };
 }
