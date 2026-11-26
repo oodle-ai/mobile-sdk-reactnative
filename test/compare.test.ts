@@ -314,6 +314,33 @@ describe('comparison scripts', () => {
     expect(fs.readFileSync(path.join(out, 'parity.md'), 'utf8')).toContain('| forced-long-task-ms | info | same | 0 of 1 | all: `380 (380…380)` / `400 (400…400)` |');
   });
 
+  // With one launch the median, the lowest and the highest are the same
+  // value, so this run has three launches with different durations.
+  it('gives the median and the range of the forced long task durations', async () => {
+    const out = tmp();
+    const c = await startCollector(out);
+    const durations = [
+      { oodle: 410, reference: 400 },
+      { oodle: 360, reference: 430 },
+      { oodle: 380, reference: 405 },
+    ];
+    const rows: string[] = [];
+    for (const [i, d] of durations.entries()) {
+      const launch = `soak-both-off-r1-${i + 1}`;
+      const t0 = Date.now() - 5000 + i * 1000;
+      await c.scenario({ name: launch, provider: 'both' });
+      expect(await c.oodle(oodleLaunch(launch, `oo-${i}`, STEPS, t0, { longTaskMs: d.oodle }))).toBe(202);
+      expect(await c.reference(referenceLaunch(launch, `ref-${i}`, STEPS, t0, { longTaskMs: d.reference }))).toBe(202);
+      rows.push(launchRow('both', 1, i + 1, 900).replace(/soak-both-on-r1-\d+/, launch));
+    }
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout + r.stderr).toContain('all parity checks passed');
+    expect(fs.readFileSync(path.join(out, 'parity.md'), 'utf8')).toContain(
+      '| forced-long-task-ms | info | same | 0 of 1 | all: `380 (360…410)` / `405 (400…430)` |',
+    );
+  });
+
   // The reference SDK opens a session at launch for its ApplicationLaunch
   // view, and the sign-in of the fixture stops it. That session does not count.
   it('does not count a reference session with only the launch view', async () => {
