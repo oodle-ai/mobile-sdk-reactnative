@@ -186,7 +186,9 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
   `js_crash_marker`, and native code skips a JS fatal within 10 s of it.
   The abort() can come before the marker, so the next start also drops a
   native crash of those types within 10 s of the marker
-  (`reportPendingCrash`). Each JS fatal is reported once.
+  (`reportPendingCrash`). Each JS fatal is reported once. Any signal in
+  that window is dropped too: while React Native removes the JS runtime,
+  the JS thread can crash in Hermes (a SIGSEGV, seen on iOS 0.79.7).
 - The JS handler passes a fatal error on after `FATAL_HANDOFF_DELAY_MS`.
   React Native's handler ends the process, and a crash reporter earlier
   in the chain (the reference SDK) writes its report on native queues.

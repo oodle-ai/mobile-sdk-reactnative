@@ -16,6 +16,12 @@
   `mask-all` removed the label also when no replay was recorded, so every
   tap was `Pressable`, with no text. With replay on, `mask-all` still
   removes the label, as before.
+- A fatal JS error is one crash, also when the process ends with a
+  second signal. While React Native removes the JS runtime, the JS thread
+  can still run and crash in Hermes (a SIGSEGV just after the error). The
+  next start sent that as a second, native crash. Now a native crash of
+  any signal within 10 s of a fatal JS error is not sent, as for SIGABRT
+  before.
 
 ## 0.1.6
 

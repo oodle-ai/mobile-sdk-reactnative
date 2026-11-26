@@ -209,7 +209,9 @@ it. The Oodle replay player plays them as it plays browser sessions.
   The tap position is not sent there, nor anywhere with
   `touchPrivacy: 'hide'`. With `sessionReplay: false`, `'mask-all'` does
   not apply to taps (nothing is recorded); `hidden` and `mask` subtrees
-  still do.
+  still do. With replay on, `'mask-all'` applies to the taps of every
+  session, also those that `sampleRate` does not record, so a button has
+  the same name in each session.
 
 ## How it works
 
