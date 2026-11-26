@@ -39,7 +39,10 @@ export function createNativeFetch(net: Networking) {
     const url = typeof input === 'string' ? input : input.url;
     const method = (init.method ?? (typeof input === 'string' ? undefined : input.method) ?? 'GET').toUpperCase();
     const headers: Record<string, string> = {};
-    new Headers((init.headers ?? (typeof input === 'string' ? undefined : input.headers)) as HeadersInit | undefined).forEach(
+    // The type of the constructor's argument: React Native's types name it
+    // HeadersInit_, the DOM's HeadersInit.
+    type HeadersArg = ConstructorParameters<typeof Headers>[0];
+    new Headers((init.headers ?? (typeof input === 'string' ? undefined : input.headers)) as HeadersArg).forEach(
       (value, name) => {
         headers[name] = value;
       },
