@@ -244,12 +244,45 @@ and replay, so one build serves every run.
   must report a long task for it (`forced-long-task`).
   `forced-long-task-ms` gives the durations that each SDK reported for it
   (median and range), to show how near they are to 400 ms.
+  Each four launches go through each start order with each fetch
+  (`ORDER=alternate`, `FETCH=alternate`): the SDK that starts second
+  wraps the fetch, XHR and error handlers of the first, and a `native`
+  fetch (`fixtures/fieldwork/src/native-fetch.ts`) does not run on XHR,
+  as Expo's, so only the fetch wrappers see its requests. The report
+  gives the kind of each launch that differs.
+  CI taps two tabs in each launch with a real touch (`tap_label` in
+  `scripts/ci/device.sh`: `adb shell input tap` on Android, AXe on iOS,
+  where simctl has no tap) and records the taps, so `taps` checks
+  Oodle's taps and their labels against them. The reference SDK finds
+  taps through its Babel plugin, which `create-fixture.sh` adds to the
+  fixture (without it, it reported none); `taps (reference)` gives its
+  taps against the same ones (info). A tap that CI could not make fails
+  the run (`taps-made`).
+  Each request that reaches the stand-in API with a sampled `traceparent`
+  must have its trace on Oodle's resource (`traced-requests`) and an Oodle
+  client span with its ids on the session of the launch (`client-spans`).
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device, with the settings that each SDK ships with
   (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI
   checks. `cost.mjs` reports CPU (all threads, the main thread, the JS
   thread), memory, start time, frames, bytes and requests, with the
   difference from the launches with no SDK in each round and its range.
+  The order of the SDKs turns each round, over six rounds, so each SDK
+  runs in each place twice on a device that changes speed; the baseline row gives its own range over
+  the rounds, the noise to read the differences against. A start time
+  is the median of the launches of a round, not the mean: on Android the
+  first start after the app data is cleared is at times some 450 ms
+  faster, with any SDK. The report gives when CI's `dumpsys gfxinfo
+  reset` ran against the start of the app, to find if it is in the
+  measure. The lag of a
+  view update is from the time of the update: the reference SDK dates a
+  view at its start, so the collector adds its time spent. On iOS, ps
+  shows no thread names; `scripts/ci/thread-cpu.py` reads the JS
+  thread's time from the kernel's thread info. After the rounds, the iOS cost run
+  samples a few more launches of each SDK with macOS `sample`
+  (`PROFILE`, `js-thread-profile.mjs`): the report then names the native
+  frames on the JS thread. The sampler slows the app, so these launches
+  are not in the cost.
   Every measure comes from outside the app (`scripts/ci/device.sh`; the
   time to ready is the time of the app's calls to the mock collector).
   CI emulators render in software, so measure frames and start time on a
