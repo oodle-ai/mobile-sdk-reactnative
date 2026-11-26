@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Changes that alter the counts
+
+- A long task has a more correct duration and start. The SDK finds a
+  block of the JS thread from a timer that runs every 50 ms. It gave the
+  delay of the timer, which is less than the block by up to 50 ms: in the
+  comparison runs a 400 ms block gave 350 to 409 ms. It now gives the
+  time since the last tick less 25 ms, which is wrong by at most 25 ms.
+  Long tasks are longer by 25 ms on average, and a few more blocks just
+  over `longTaskThresholdMs` are long tasks.
+
 ## 0.1.6
 
 ### Uploads
