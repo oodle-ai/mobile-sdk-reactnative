@@ -90,7 +90,10 @@ count() {
   echo "${n:-0}"
 }
 armed() { [ "$(count "\"action_name\":\"scenario:$1\"")" -gt 0 ]; }
-app_gone() { [ -z "$(app_pid)" ]; }
+# The process with this pid has ended. A new process of the app does not
+# count: on Android a WorkManager job of the reference SDK can start one
+# in the background just after a crash.
+pid_gone() { ! app_pid | tr ' ' '\n' | grep -x "$1" > /dev/null; }
 more_crashes_than() { [ "$(count '"error_is_crash":1')" -gt "$1" ]; }
 reference_crash() { grep -F "\"scenario\":\"$1\"" "$REFERENCE" 2> /dev/null | grep -q 'is_crash'; }
 offline_actions_sent() { [ "$(count '"action_name":"Offline action')" -ge 3 ]; }
@@ -98,17 +101,18 @@ walk_done() { [ "$(count "\"action_name\":\"soak:done:$1\"")" -gt 0 ]; }
 
 # crash_run <name> <order> <self|jvm|signal>
 crash_run() {
-  local name="$1" order="$2" how="$3" crashes
+  local name="$1" order="$2" how="$3" crashes pid
   echo "--- scenario $name ($order, $how)"
   set_scenario "$name" "$order"
   start_app
   wait_for "the app to send scenario:$name" 60 armed "$name"
+  pid=$(app_pid | awk '{ print $1 }')
   case "$how" in
     jvm) jvm_crash ;;
     signal) signal_crash ;;
     self) ;; # The app throws the JS fatal error itself.
   esac
-  wait_for "the app to end" 30 app_gone
+  wait_for "the app to end" 30 pid_gone "$pid"
   after_crash
   crashes=$(count '"error_is_crash":1')
   # The next start sends the crash. Its uploads are tagged with this name.

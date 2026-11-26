@@ -16,9 +16,14 @@ const JS_CRASH_WINDOW_MS = 10_000;
 /**
  * The native crash types that a JS fatal error ends in: React Native
  * raises RCTFatalException on iOS and JavascriptException on Android, and
- * both can end in abort().
+ * both can end in abort(). React Native then ends the process, and while it
+ * removes the JS runtime, the JS thread can still run queued jobs and crash
+ * in Hermes with another signal (a SIGSEGV in its garbage collector, seen
+ * on the CI simulators). That signal is the end of the same crash, so each
+ * signal counts (`SIGSEGV`; Android's exit record gives `Signal 9` for the
+ * ones it does not name).
  */
-const JS_FATAL_NATIVE_TYPE = /^(SIGABRT\b|RCTFatalException|[\w.$]*JavascriptException\b)/;
+const JS_FATAL_NATIVE_TYPE = /^(SIG[A-Z]+\b|Signal \d+$|RCTFatalException|[\w.$]*JavascriptException\b)/;
 /** The time a fatal JS error waits before it goes to the next handler. */
 export const FATAL_HANDOFF_DELAY_MS = 200;
 
@@ -265,9 +270,9 @@ export function uninstallConsoleTracking() {
  * A JS fatal error also ends in a native crash, which the native handlers
  * can record before the JS handler has written its marker (on iOS, the
  * abort() can come first). The JS handler already recorded that crash with
- * its JS stack, so its native copy is not sent.
+ * its JS stack, so its native copy is not sent. Exported for tests.
  */
-function isNativeCopyOfJsFatal(crash: NativeCrash, jsFatalAt: number): boolean {
+export function isNativeCopyOfJsFatal(crash: NativeCrash, jsFatalAt: number): boolean {
   return (
     jsFatalAt > 0 &&
     JS_FATAL_NATIVE_TYPE.test(crash.type || '') &&

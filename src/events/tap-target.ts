@@ -43,6 +43,18 @@ export interface ResolveOptions {
   maskText?: boolean;
 }
 
+/**
+ * True when tap labels must have no text: the replay is on and masks all
+ * text. With replay off nothing is recorded, so the default `mask-all` does
+ * not apply, and a label keeps its text. Hidden and masked OodlePrivacy
+ * views still remove the label. The rule does not look at the replay
+ * sample of the session: then one button would have a name with text in
+ * some sessions and without it in others, and its taps would not group.
+ */
+export function masksTapText(replay: { enabled: boolean; textAndInputPrivacy: string }): boolean {
+  return replay.enabled && replay.textAndInputPrivacy === 'mask-all';
+}
+
 const MAX_DEPTH = 40;
 const MAX_TEXT_NODES = 40;
 const MAX_LABEL_CHARS = 100;

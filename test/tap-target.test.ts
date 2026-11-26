@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { collectText, componentName, resolveTapTarget, type FiberLike } from '../src/events/tap-target';
+import { collectText, componentName, masksTapText, resolveTapTarget, type FiberLike } from '../src/events/tap-target';
 
 const opts = { actionNameAttribute: 'oodle-action-name', useAccessibilityLabel: true };
 
@@ -169,6 +169,15 @@ describe('resolveTapTarget privacy', () => {
     expect(masked.private).toBe(false);
     const allowed = resolveTapTarget(rowIn('oodle-privacy-allow'), { ...opts, maskText: true })!;
     expect(allowed.label).toBe('John Smith, balance $4,210');
+  });
+
+  it('masks tap text only when the replay is on and masks all text', () => {
+    // The default privacy is mask-all also when replay is off. Then there
+    // is no replay to match, and the taps of the comparison runs with
+    // replay off had no labels.
+    expect(masksTapText({ enabled: false, textAndInputPrivacy: 'mask-all' })).toBe(false);
+    expect(masksTapText({ enabled: true, textAndInputPrivacy: 'mask-all' })).toBe(true);
+    expect(masksTapText({ enabled: true, textAndInputPrivacy: 'mask-all-inputs' })).toBe(false);
   });
 
   it('uses the text of the button when nothing masks it', () => {
