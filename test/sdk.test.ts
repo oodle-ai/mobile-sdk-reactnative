@@ -1183,6 +1183,23 @@ describe('OodleRum end to end', () => {
     await settle();
     expect(events('error').filter((e) => e.exception_type === 'SIGABRT')).toHaveLength(1);
   });
+
+  it('counts a signal just after a JS fatal error as the end of that crash', async () => {
+    const errors = await import('../src/events/errors');
+    const at = 1_700_000_000_000;
+    const crash = (type: string, dt: number) => ({ timestamp: at + dt, type, message: '', stack: '', source: 'ios' });
+    // React Native removes the JS runtime while the JS thread still runs:
+    // a SIGSEGV in Hermes 5 ms after the fatal error (CI, iOS 0.79.7).
+    expect(errors.isNativeCopyOfJsFatal(crash('SIGSEGV', 5), at)).toBe(true);
+    expect(errors.isNativeCopyOfJsFatal(crash('SIGABRT', -50), at)).toBe(true);
+    expect(errors.isNativeCopyOfJsFatal(crash('Signal 9', 5), at)).toBe(true);
+    expect(errors.isNativeCopyOfJsFatal(crash('RCTFatalException: Unhandled JS Exception', 5), at)).toBe(true);
+    // Later, or with no JS fatal error, a signal is a crash of its own.
+    expect(errors.isNativeCopyOfJsFatal(crash('SIGSEGV', 10_000), at)).toBe(false);
+    expect(errors.isNativeCopyOfJsFatal(crash('SIGSEGV', 5), 0)).toBe(false);
+    // An exception of the app is not a copy, also in the window.
+    expect(errors.isNativeCopyOfJsFatal(crash('NSInvalidArgumentException', 5), at)).toBe(false);
+  });
 });
 
 // Runs after the tests above, on every upload that they caused.
