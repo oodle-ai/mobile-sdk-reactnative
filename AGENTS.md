@@ -162,7 +162,9 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 
 - Tap actions follow the replay privacy rules (`privacyLevelOf` in
   `src/events/tap-target.ts`): under `hidden`, `mask` or `mask-all`, a tap
-  has no text label and, in a private area, no position.
+  has no text label and, in a private area, no position. `mask-all` is the
+  default also with replay off, so it applies only while replay is on
+  (`masksTapText`); otherwise every tap was a bare `Pressable`.
 - rrweb builds an added node without its `childNodes`: a mutation adds
   each child (text, picture) on its own.
 - The picture of a drawing is a child element, so a move does not send it

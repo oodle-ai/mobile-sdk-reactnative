@@ -11,6 +11,11 @@
   time since the last tick less 25 ms, which is wrong by at most 25 ms.
   Long tasks are longer by 25 ms on average, and a few more blocks just
   over `longTaskThresholdMs` are long tasks.
+- A tap has its label (`action_text`, and the text in `action_name`) when
+  session replay is off (`sessionReplay: false`). The default text privacy
+  `mask-all` removed the label also when no replay was recorded, so every
+  tap was `Pressable`, with no text. With replay on, `mask-all` still
+  removes the label, as before.
 
 ## 0.1.6
 
