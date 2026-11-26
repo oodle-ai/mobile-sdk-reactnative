@@ -96,6 +96,14 @@ fetch_of() {
   esac
 }
 
+# The host clock in ms: the clock of the mock collector, which runs on
+# the same machine. GNU date has ms; macOS date does not.
+if [ "$(date +%3N)" != "3N" ]; then
+  now_ms() { date +%s%3N; }
+else
+  now_ms() { python3 -c 'import time; print(int(time.time() * 1000))'; }
+fi
+
 # Sleeps until second <s> of the shell's clock ($SECONDS), so a slow tap
 # does not make the launch longer.
 sleep_until() {
@@ -136,7 +144,12 @@ for i in $(seq 1 "$LAUNCHES"); do
   set_scenario "$name" $((SEED + i)) "$order" "$fetch"
   start_app
   started=$SECONDS
+  # When CI's frames reset ran (Android: dumpsys gfxinfo, which makes the
+  # app's process do work while it starts), against the app's calls to
+  # the collector. cost.mjs reports if it overlaps the start of the app.
+  reset_from=$(now_ms)
   frames_reset
+  reset_to=$(now_ms)
   pid=$(app_pid)
   # The taps that reached an element, as a JSON list: what the app was
   # given, to check what each SDK reported.
@@ -177,8 +190,8 @@ for i in $(seq 1 "$LAUNCHES"); do
       frames=$(frames_json)
       ;;
   esac
-  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","order":"%s","fetch":"%s","taps":[%s],"taps_missed":[%s],"round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
-    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$order" "$fetch" "${taps%,}" "${missed%,}" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
+  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","order":"%s","fetch":"%s","taps":[%s],"taps_missed":[%s],"frames_reset_ms":[%s,%s],"round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
+    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$order" "$fetch" "${taps%,}" "${missed%,}" "$reset_from" "$reset_to" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
     "${START_MS:-null}" "${cpu:-null}" "${threads:-null}" "${mem:-null}" "${frames:-null}" >> "$LAUNCHES_FILE"
   echo "$name: $order, fetch $fetch, taps [${taps%,}]${missed:+, not made [${missed%,}]}, end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
 done

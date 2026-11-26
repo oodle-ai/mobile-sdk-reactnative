@@ -687,4 +687,37 @@ describe('comparison scripts', () => {
     expect(r.stdout).toMatch(/FAIL taps-made: differs in 1 of 1 \(all: taps that CI made `1 of 2` \/ not made `Orders`\)/);
     expect(r.status).toBe(1);
   });
+  // On Android the first start after soak.sh clears the app data is at
+  // times some 450 ms faster to ready, with any SDK or none. The mean of a
+  // round moved by about 90 ms for it.
+  it('takes the median start time of a round, and reports when the frames reset ran', async () => {
+    const out = tmp();
+    const t0 = 1_800_000_000_000;
+    const toReady = [515, 505, 45, 510, 512];
+    const fixture: string[] = [];
+    const rows: string[] = [];
+    for (const [i, ms] of toReady.entries()) {
+      const name = `soak-none-on-r1-${i + 1}`;
+      const set = t0 + i * 60_000;
+      fixture.push(
+        JSON.stringify({ received_ms: set, kind: 'set', scenario: name }),
+        JSON.stringify({ received_ms: set + 300, kind: 'read', scenario: name }),
+        JSON.stringify({ received_ms: set + 300 + ms, kind: 'ready', scenario: name }),
+      );
+      // The reset runs during the start of the app, but not in the fast launch.
+      const reset = ms < 100 ? [set + 900, set + 950] : [set + 250, set + 700];
+      rows.push(launchRow('none', 1, i + 1, 1000, { frames_reset_ms: reset }));
+    }
+    fs.writeFileSync(path.join(out, 'fixture.ndjson'), fixture.join('\n') + '\n');
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('cost.mjs', out);
+    expect(r.status).toBe(0);
+    const { rows: cost, frames_reset: reset } = JSON.parse(fs.readFileSync(path.join(out, 'cost.json'), 'utf8'));
+    // The median, 510 ms; the mean would be 417 ms.
+    expect(cost[0].js_to_ready_ms).toBe(510);
+    expect(reset).toMatchObject({ launches: 5, during_start: 4, js_to_ready_ms_during: 510, js_to_ready_ms_outside: 45 });
+    expect(fs.readFileSync(path.join(out, 'cost.md'), 'utf8')).toContain(
+      'It ran during the start of the app in 4 launches: JS to ready 510 ms there, 45 ms in the others.',
+    );
+  });
 });

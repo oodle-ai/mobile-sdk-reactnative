@@ -263,7 +263,12 @@ and replay, so one build serves every run.
   difference from the launches with no SDK in each round and its range.
   The order of the SDKs turns each round, over six rounds, so each SDK
   runs in each place twice on a device that changes speed; the baseline row gives its own range over
-  the rounds, the noise to read the differences against. The lag of a
+  the rounds, the noise to read the differences against. A start time
+  is the median of the launches of a round, not the mean: on Android the
+  first start after the app data is cleared is at times some 450 ms
+  faster, with any SDK. The report gives when CI's `dumpsys gfxinfo
+  reset` ran against the start of the app, to find if it is in the
+  measure. The lag of a
   view update is from the time of the update: the reference SDK dates a
   view at its start, so the collector adds its time spent. On iOS, ps
   shows no thread names; `scripts/ci/thread-cpu.py` reads the JS
