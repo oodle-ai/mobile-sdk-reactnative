@@ -310,6 +310,8 @@ describe('comparison scripts', () => {
     expect(r.status).toBe(0);
     const report = JSON.parse(fs.readFileSync(path.join(out, 'parity.json'), 'utf8'));
     expect(report.checks.filter((c: { differ: number }) => c.differ > 0)).toEqual([]);
+    // The durations of the forced block are a measure: the median, then the range.
+    expect(fs.readFileSync(path.join(out, 'parity.md'), 'utf8')).toContain('| forced-long-task-ms | info | same | 0 of 1 | all: `380 (380…380)` / `400 (400…400)` |');
   });
 
   // The reference SDK opens a session at launch for its ApplicationLaunch

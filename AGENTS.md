@@ -238,6 +238,8 @@ and replay, so one build serves every run.
   are checked on a known block: after its steps, the walk sends
   `soak:long-task:<name>` and blocks the JS thread for 400 ms, and Oodle
   must report a long task for it (`forced-long-task`).
+  `forced-long-task-ms` gives the durations that each SDK reported for it
+  (median and range), to show how near they are to 400 ms.
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device, with the settings that each SDK ships with
   (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI
