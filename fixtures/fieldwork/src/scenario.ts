@@ -30,6 +30,8 @@ const int = (value: unknown, fallback: number) =>
 const JS_FATAL_MESSAGE = 'Fixture JS fatal';
 /** The offline scenario sends this many actions, named "Offline action <n>". */
 const OFFLINE_ACTIONS = 3;
+/** The scenario in which the mock collector answers with garbage (scripts/ci/scenarios.sh). */
+const GARBAGE_SCENARIO = 'collector-garbage';
 
 /**
  * Reads what CI wants this start of the app to do, from the mock
@@ -78,9 +80,13 @@ export function reportReady(scenario: Scenario) {
  * scenario ran in. Crashes that come from outside the app (a signal, a
  * JVM crash from adb) and the kill are done by the CI script. A soak
  * scenario (a name that starts with "soak") runs the walk in src/soak.ts.
+ * So does collector-garbage, while the mock collector answers each Oodle
+ * upload with garbage: the app must go on to the end of the walk.
  */
 export function runScenario(scenario: Scenario, go: (tab: Tab) => void): () => void {
-  if (scenario.name.startsWith('soak')) return runSoak(scenario.name, scenario.seed, scenario.steps, go);
+  if (scenario.name.startsWith('soak') || scenario.name === GARBAGE_SCENARIO) {
+    return runSoak(scenario.name, scenario.seed, scenario.steps, go);
+  }
   let stopped = false;
   void (async () => {
     // Let the first view reach the collector first.

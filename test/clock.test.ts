@@ -33,4 +33,23 @@ describe('clock offset', () => {
     observeServerDate('not a date', 0, 1);
     expect(clockOffset()).toBe(0);
   });
+
+  it('ignores a date that is not a collector clock (a captive portal, a proxy)', () => {
+    const device = Date.parse('2026-01-01T00:00:00.000Z');
+    for (const header of [
+      'Thu, 01 Jan 1970 00:00:00 GMT',
+      'Fri, 31 Dec 9999 23:59:59 GMT',
+      'Sat, 13 Sep 275760 00:00:00 GMT',
+    ]) {
+      observeServerDate(header, device, device + 10);
+      expect(clockOffset(), header).toBe(0);
+      expect(isoTime(device), header).toBe('2026-01-01T00:00:00.000Z');
+    }
+  });
+
+  it('never throws from isoTime', () => {
+    expect(() => isoTime(NaN)).not.toThrow();
+    expect(() => isoTime(8.64e15 + 1)).not.toThrow();
+    expect(Number.isFinite(Date.parse(isoTime(Infinity)))).toBe(true);
+  });
 });

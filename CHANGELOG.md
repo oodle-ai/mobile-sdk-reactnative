@@ -20,6 +20,18 @@
   `forEach` threw before the app's fetch ran.
 - Fixed: a failed upload could leave a rejected promise, which the SDK's
   own tracker then reported as an unhandled rejection of the app.
+- Fixed: a step that failed on the way to the background stopped the
+  steps after it, also the outbox write; the events of that moment were
+  lost. Each step now runs on its own.
+- Fixed: a `Date` header in the year 275760 (from a proxy) made every
+  timestamp invalid, and a date of 1970 or 9999 moved the events by years.
+  A date outside 2020 to 2100 is not used.
+- Android: each callback that the platform calls (lifecycle, the
+  watchdog thread, posted blocks, frame callbacks, executor tasks) is
+  guarded. The ANR watchdog thread ended the app on an exception other
+  than its stop.
+- iOS: fixed traps in Swift: a view with a NaN size (the picture key), a
+  NaN color component, and a negative byte in the device model name.
 
 ## 0.1.6
 

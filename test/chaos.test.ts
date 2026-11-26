@@ -637,6 +637,10 @@ const CASES: Case[] = [
   { name: 'collector answers null', collector: { garbage: null } },
   { name: 'collector answers 42', collector: { garbage: 42 } },
   { name: 'collector answers { status: "ok" }', collector: { garbage: { status: 'ok', rateLimits: 7 } } },
+  {
+    name: 'collector answers with a date in the year 275760 and bad rate limits',
+    collector: { garbage: { status: 202, rateLimits: 'events:;;:abc,:-1,replay:1e999', date: 'Sat, 13 Sep 275760 00:00:00 GMT' } },
+  },
   ...MODULES.filter((m) => !NO_CALLS.has(m)).map(
     (m): Case =>
       CALLED_IN_INIT.has(m)

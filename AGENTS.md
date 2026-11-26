@@ -134,7 +134,27 @@ or gives values of the wrong form, the collector fails, each SDK module's
 functions throw) and runs the same app script as with no SDK. The app
 must see the same results, errors, console lines and global handler
 calls, with no exception from a timer and no promise left rejected. A
-new hook into the app needs a step in that script.
+new hook into the app needs a step in that script. `test/fuzz.test.ts`
+gives the API and the wrappers seeded random values (hostile ones too);
+`FUZZ_SEED` repeats a failure.
+
+- Each step on the way to the background, and back, has a guard of its
+  own, so a step that fails does not stop the outbox write.
+- The native bridge (`src/core/native.ts`) checks the form of the JSON
+  that native code gives. Native code of another version (an
+  over-the-air JS update) can give another form.
+- A `Date` header outside 2020 to 2100 does not set the clock offset: it
+  comes from a captive portal or a proxy, not from the collector.
+- Android: each callback that the platform calls runs its body in
+  `safely { }` (`Safe.kt`). An exception on any thread ends the app.
+- iOS: Swift cannot catch a trap. No `as!`, `try!` or force unwrap, and
+  a floating value becomes an integer only through `finiteInt` or
+  `finiteInt64`. A line that needs one has `// force: <reason>` or
+  `// trap-free: <reason>` on the line before it.
+- `test/guard.test.ts` checks these rules in `src/`, `android/` and
+  `ios/`. The device run has the `collector-garbage` scenario: the mock
+  collector answers each upload with garbage, and the app must finish its
+  walk and still run.
 
 ## Only user activity starts a session
 
@@ -232,7 +252,7 @@ react-native. `test/sdk.test.ts` drives the full pipeline with a fake
 native module and fake XHR.
 
 CI also runs the Fieldwork fixture on a device (`scripts/ci/`): a smoke
-run, then crash and offline scenarios. The app reads each scenario from
+run, then crash, offline and collector-garbage scenarios. The app reads each scenario from
 the mock collector (`/fixture/scenario`), so a new scenario needs no
 native change to the app. A scenario that must end the app from outside
 (a signal, `am crash`, a kill) does that in `scenarios.sh`; the app only
