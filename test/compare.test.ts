@@ -281,7 +281,7 @@ describe('comparison scripts', () => {
     return d;
   };
 
-  async function bothRun(referenceSteps: Step[], oodleEnd: LaunchEnd = {}, referenceEnd: LaunchEnd = {}) {
+  async function bothRun(referenceSteps: Step[], oodleEnd: LaunchEnd = {}, referenceEnd: LaunchEnd = {}, referenceExtra: object[] = []) {
     const out = tmp();
     const c = await startCollector(out);
     const launch = 'soak-both-on-r1-1';
@@ -290,7 +290,7 @@ describe('comparison scripts', () => {
     expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, oodleEnd), [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 4 }, { type: 2 }] }], 'batch-1')).toBe(202);
     // A body sent again with its batch id is stored once.
     expect(await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, oodleEnd), [], 'batch-1')).toBe(202);
-    expect(await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0, referenceEnd))).toBe(202);
+    expect(await c.reference([...referenceExtra, ...referenceLaunch(launch, 'ref-1', referenceSteps, t0, referenceEnd)])).toBe(202);
     expect(await c.referenceReplay('ref-1')).toBe(202);
     fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900).replace(/soak-both-on-r1-1/, launch) + '\n');
     return out;
@@ -310,6 +310,21 @@ describe('comparison scripts', () => {
     expect(r.status).toBe(0);
     const report = JSON.parse(fs.readFileSync(path.join(out, 'parity.json'), 'utf8'));
     expect(report.checks.filter((c: { differ: number }) => c.differ > 0)).toEqual([]);
+  });
+
+  // The reference SDK opens a session at launch for its ApplicationLaunch
+  // view, and the sign-in of the fixture stops it. That session does not count.
+  it('does not count a reference session with only the launch view', async () => {
+    const t0 = Date.now() - 6000;
+    const view = { id: 'launch-v', name: 'ApplicationLaunch', is_active: false, time_spent: 1e9 };
+    const out = await bothRun(STEPS, {}, {}, [
+      { date: t0, type: 'view', session: { id: 'ref-launch' }, view, _dd: { document_version: 1 } },
+      { date: t0, type: 'vital', session: { id: 'ref-launch' }, view },
+    ]);
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.status).toBe(0);
+    const report = JSON.parse(fs.readFileSync(path.join(out, 'parity.json'), 'utf8'));
+    expect(report.checks.find((c: { check: string }) => c.check === 'sessions')).toMatchObject({ differ: 0, of: 1 });
   });
 
   // The stand-in app API sees every request of the app, so it shows which

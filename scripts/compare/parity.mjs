@@ -193,7 +193,16 @@ for (const launch of launches) {
 // Over the whole run: an event that arrives twice counts twice.
 const dupes = Object.fromEntries(SDKS.map((sdk) => [sdk, events[sdk].length - new Set(events[sdk].map((e) => e.id)).size]));
 compare('no-duplicates', 'must', 'all', dupes.oodle, dupes.reference, dupes.oodle === 0 && dupes.reference === 0);
-compare('sessions', 'info', 'all', bySession.oodle.size, bySession.reference.size);
+// The reference SDK opens a session at launch for its `ApplicationLaunch`
+// view. The sign-in of the fixture stops that session, so each launch
+// gives it one more session, with only that view (and its vitals). Oodle
+// starts no session before the first activity, so a stop before it ends
+// nothing. An app that does not stop the session gets one session per
+// launch from each SDK, so these sessions are not counted.
+const LAUNCH_VIEW = 'ApplicationLaunch';
+const launchOnly = (ev) => ev.every((e) => e.type === 'vital' || (e.type === 'view' && e.screen === LAUNCH_VIEW));
+const sessionCount = (sdk) => [...bySession[sdk].values()].filter((ev) => !launchOnly(ev)).length;
+compare('sessions', 'info', 'all', sessionCount('oodle'), sessionCount('reference'));
 // Two SDKs that each add a traceparent give a request two of them, which a
 // backend can reject or read as the wrong trace. Each request must carry
 // at most one.
