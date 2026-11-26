@@ -1,6 +1,27 @@
 # Changelog
 
-## Unreleased
+## 0.1.7
+
+### Changes that alter the counts
+
+- A long task has a more correct duration and start. The SDK finds a
+  block of the JS thread from a timer that runs every 50 ms. It gave the
+  delay of the timer, which is less than the block by up to 50 ms: in the
+  comparison runs a 400 ms block gave 350 to 409 ms. It now gives the
+  time since the last tick less 25 ms, which is wrong by at most 25 ms.
+  Long tasks are longer by 25 ms on average, and a few more blocks just
+  over `longTaskThresholdMs` are long tasks.
+- A tap has its label (`action_text`, and the text in `action_name`) when
+  session replay is off (`sessionReplay: false`). The default text privacy
+  `mask-all` removed the label also when no replay was recorded, so every
+  tap was `Pressable`, with no text. With replay on, `mask-all` still
+  removes the label, as before.
+- A fatal JS error is one crash, also when the process ends with a
+  second signal. While React Native removes the JS runtime, the JS thread
+  can still run and crash in Hermes (a SIGSEGV just after the error). The
+  next start sent that as a second, native crash. Now a native crash of
+  any signal within 10 s of a fatal JS error is not sent, as for SIGABRT
+  before.
 
 ### A bug in the SDK does not reach the app
 
@@ -32,29 +53,6 @@
   than its stop.
 - iOS: fixed traps in Swift: a view with a NaN size (the picture key), a
   NaN color component, and a negative byte in the device model name.
-
-## 0.1.7
-
-### Changes that alter the counts
-
-- A long task has a more correct duration and start. The SDK finds a
-  block of the JS thread from a timer that runs every 50 ms. It gave the
-  delay of the timer, which is less than the block by up to 50 ms: in the
-  comparison runs a 400 ms block gave 350 to 409 ms. It now gives the
-  time since the last tick less 25 ms, which is wrong by at most 25 ms.
-  Long tasks are longer by 25 ms on average, and a few more blocks just
-  over `longTaskThresholdMs` are long tasks.
-- A tap has its label (`action_text`, and the text in `action_name`) when
-  session replay is off (`sessionReplay: false`). The default text privacy
-  `mask-all` removed the label also when no replay was recorded, so every
-  tap was `Pressable`, with no text. With replay on, `mask-all` still
-  removes the label, as before.
-- A fatal JS error is one crash, also when the process ends with a
-  second signal. While React Native removes the JS runtime, the JS thread
-  can still run and crash in Hermes (a SIGSEGV just after the error). The
-  next start sent that as a second, native crash. Now a native crash of
-  any signal within 10 s of a fatal JS error is not sent, as for SIGABRT
-  before.
 
 ## 0.1.6
 
