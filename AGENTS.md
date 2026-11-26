@@ -276,7 +276,11 @@ and replay, so one build serves every run.
   view update is from the time of the update: the reference SDK dates a
   view at its start, so the collector adds its time spent. On iOS, ps
   shows no thread names; `scripts/ci/thread-cpu.py` reads the JS
-  thread's time from the kernel's thread info.
+  thread's time from the kernel's thread info. After the rounds, the iOS cost run
+  samples a few more launches of each SDK with macOS `sample`
+  (`PROFILE`, `js-thread-profile.mjs`): the report then names the native
+  frames on the JS thread. The sampler slows the app, so these launches
+  are not in the cost.
   Every measure comes from outside the app (`scripts/ci/device.sh`; the
   time to ready is the time of the app's calls to the mock collector).
   CI emulators render in software, so measure frames and start time on a

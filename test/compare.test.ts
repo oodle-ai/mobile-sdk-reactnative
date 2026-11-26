@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseReferenceReplay, parseReferenceRum, parseEnvelope, parseMultipart } from '../scripts/intake.mjs';
 // @ts-expect-error: a plain JS module of the CI scripts.
 import { fromReference, lastViewUpdates } from '../scripts/compare/lib.mjs';
+import { jsThreadNodes, report as jsThreadReport, summarize } from '../scripts/compare/js-thread-profile.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
 const API = 'http://10.0.2.2:4319/api';
@@ -719,5 +720,45 @@ describe('comparison scripts', () => {
     expect(fs.readFileSync(path.join(out, 'cost.md'), 'utf8')).toContain(
       'It ran during the start of the app in 4 launches: JS to ready 510 ms there, 45 ms in the others.',
     );
+  });
+});
+
+describe('js-thread-profile.mjs', () => {
+  // The shape of macOS `sample`: a call tree per thread, two characters a level.
+  const sample = (storageSamples: number) =>
+    [
+      'Call graph:',
+      '    100 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)',
+      '    + 100 start  (in dyld) + 1  [0x1]',
+      '    100 Thread_2: com.facebook.react.runtime.JavaScript',
+      '    + 100 thread_start  (in libsystem_pthread.dylib) + 8  [0x2]',
+      '    +   100 +[RCTJSThreadManager runRunLoop]  (in OodleExample) + 212  [0x3]',
+      '    +     60 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x4]',
+      '    +     40 hermes::vm::Interpreter::interpretFunction  (in hermes) + 1  [0x5]',
+      `    +       ${storageSamples} -[OodleRum storageSet:value:]  (in OodleExample) + 1  [0x6]`,
+      `    +         ${storageSamples} hermes::vm::Interpreter::interpretFunction  (in hermes) + 1  [0x5]`,
+      '    100 Thread_3: hades',
+      '    + 100 -[OodleRum storageSet:value:]  (in OodleExample) + 1  [0x6]',
+      '',
+    ].join('\n');
+
+  it('reads only the JS thread and counts a frame once on a path', () => {
+    const s = summarize(jsThreadNodes(sample(30))!);
+    expect(s.total).toBe(100);
+    expect(s.busy).toBe(40);
+    expect(s.frames.get('-[OodleRum storageSet:value:] (OodleExample)')).toBe(30);
+    expect(s.frames.get('hermes::vm::Interpreter::interpretFunction (hermes)')).toBe(40);
+  });
+
+  it('reports the busy samples and the app frames of each SDK', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-thread-'));
+    fs.writeFileSync(path.join(dir, 'soak-oodle-off-rprofile-1.txt'), sample(30));
+    fs.writeFileSync(path.join(dir, 'soak-none-off-rprofile-1.txt'), sample(0));
+    const md = jsThreadReport(dir);
+    expect(md).toContain('| oodle | 1 | 100 | 40 |');
+    expect(md).toContain('| 30 | `-[OodleRum storageSet:value:]` |');
+    // The run loop frame holds every sample of the thread: not listed.
+    expect(md).not.toContain('RCTJSThreadManager');
+    expect(jsThreadReport(path.join(dir, 'none'))).toContain('No sample of the JS thread.');
   });
 });

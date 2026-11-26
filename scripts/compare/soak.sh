@@ -44,6 +44,12 @@
 #   SDK_SETTINGS  ci|shipped: the upload and log settings of both SDKs
 #             (fixtures/fieldwork/src/config.ts, default ci)
 #   REFERENCE_DEBUG  1 starts the reference SDK with its debug log, in the device log
+#   LAUNCHES_FILE  where each launch adds its line (default
+#             <collector dir>/launches.ndjson)
+#   SAMPLE_DIR  iOS: samples the app with macOS `sample` during each walk
+#             into <SAMPLE_DIR>/<scenario name>.txt, for
+#             js-thread-profile.mjs. The sampler slows the app, so do not
+#             write these launches to the launches file of a cost run.
 set -euo pipefail
 PLATFORM="${1:?android|ios}"
 OUT="${2:?collector dir}"
@@ -70,7 +76,7 @@ LAUNCH_SECONDS=$((8 + (STEPS * 12 + 9) / 10))
 PREFIX="$PROVIDER-$REPLAY-r$ROUND"
 REPLAY_JSON=$([ "$REPLAY" = off ] && echo false || echo true)
 DEBUG_JSON=$([ "${REFERENCE_DEBUG:-0}" = 1 ] && echo true || echo false)
-LAUNCHES_FILE="$OUT/launches.ndjson"
+LAUNCHES_FILE="${LAUNCHES_FILE:-$OUT/launches.ndjson}"
 ENDS=(background return kill)
 
 # set_scenario <name> <seed> [order] [fetch]
@@ -151,6 +157,12 @@ for i in $(seq 1 "$LAUNCHES"); do
   frames_reset
   reset_to=$(now_ms)
   pid=$(app_pid)
+  sampler=
+  if [ -n "${SAMPLE_DIR:-}" ] && [ "$PLATFORM" = ios ] && [ -n "$pid" ]; then
+    mkdir -p "$SAMPLE_DIR"
+    (sleep 2 && sample "$pid" $((LAUNCH_SECONDS - 4)) -file "$SAMPLE_DIR/$name.txt" > /dev/null 2>&1) &
+    sampler=$!
+  fi
   # The taps that reached an element, as a JSON list: what the app was
   # given, to check what each SDK reported.
   # A tap that the tool could not make is recorded too: parity.mjs fails
@@ -166,6 +178,7 @@ for i in $(seq 1 "$LAUNCHES"); do
     done
   fi
   sleep_until $((started + LAUNCH_SECONDS))
+  if [ -n "$sampler" ]; then wait "$sampler" || true; fi
   # A killed app is measured before the kill. The other ends are measured
   # after the background, so the work that the SDKs do on the way to the
   # background counts.
