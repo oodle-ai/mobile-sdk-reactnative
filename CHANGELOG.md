@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### A bug in the SDK does not reach the app
+
+- All SDK code that the app's thread runs goes through one guard
+  (`src/core/guard.ts`): each method of `OodleRum` and
+  `OodleSessionReplay`, each timer, each listener, and the SDK's part of
+  each wrapper (fetch, XHR, console, `React.createElement`, press
+  handlers, the global error handler). An exception in SDK code is logged
+  (the first one as a warning) and the SDK goes on. The app's own
+  functions run outside the guard, so their results and errors are as
+  before.
+- Fixed: a native module that gives JSON of an unexpected form (`null`,
+  a number) made the 5 s ANR timer throw, which ends a release app.
+- Fixed: `setUser`, `setTags`, `addFeatureFlag` and `trackNavigation`
+  threw into the app for some values (a BigInt, an object whose getters
+  throw, a `null` ref). A fetch with a headers object that throws on
+  `forEach` threw before the app's fetch ran.
+- Fixed: a failed upload could leave a rejected promise, which the SDK's
+  own tracker then reported as an unhandled rejection of the app.
+
 ## 0.1.6
 
 ### Uploads

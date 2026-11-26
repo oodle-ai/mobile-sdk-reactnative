@@ -1,4 +1,5 @@
 import { getConfig } from '../core/config';
+import { guard, guarded } from '../core/guard';
 import { INTERNAL_REQUEST } from '../core/internal';
 import { newTraceIds, tracingHeaders } from '../core/tracing';
 import { emit } from './emit';
@@ -182,82 +183,95 @@ export function installResourceTracking() {
   originals = { open: proto.open, send: proto.send, setRequestHeader: proto.setRequestHeader };
   const orig = originals;
 
+  // In each wrapper the SDK's work runs in guard(), and the app's call
+  // runs outside it: a failure in the SDK leaves the request as it was.
   proto.open = function (this: TrackedXHR, ...args: unknown[]) {
-    const method = typeof args[0] === 'string' ? args[0].toUpperCase() : 'GET';
-    const url = typeof args[1] === 'string' ? args[1] : String(args[1] ?? '');
-    this.__oodle = { method, url, headers: new Map<string, string>() };
-    if (fetchDepth > 0) {
-      this.__oodleFetch = true;
-      fetchXhr = this as unknown as XMLHttpRequest;
-    }
+    guard(() => {
+      const method = typeof args[0] === 'string' ? args[0].toUpperCase() : 'GET';
+      const url = typeof args[1] === 'string' ? args[1] : String(args[1] ?? '');
+      this.__oodle = { method, url, headers: new Map<string, string>() };
+      if (fetchDepth > 0) {
+        this.__oodleFetch = true;
+        fetchXhr = this as unknown as XMLHttpRequest;
+      }
+    });
     return orig.open.apply(this, args);
   };
 
   proto.setRequestHeader = function (this: TrackedXHR, name: string, value: string) {
-    this.__oodle?.headers.set(String(name).toLowerCase(), String(value));
+    guard(() => this.__oodle?.headers.set(String(name).toLowerCase(), String(value)));
     return orig.setRequestHeader.call(this, name, value);
   };
 
   proto.send = function (this: TrackedXHR & XMLHttpRequest, body?: unknown) {
-    const info = this.__oodle;
-    const config = getConfig();
-    if (!info || this[INTERNAL_REQUEST] || !config || isCollectorUrl(info.url)) {
-      return orig.send.call(this, body);
-    }
-
-    // Trace headers go on the XHR, also for a fetch that runs on XHR: here
-    // the headers that another SDK sets on the XHR are seen. When the reference SDK
-    // will add its own, Oodle adds none and reads the reference SDK's after it set
-    // them: before the send when the reference SDK's tracking wraps Oodle's, in the
-    // send when Oodle's wraps the reference SDK's (it sets them through the
-    // setRequestHeader above).
-    const reference = referenceTraces(this);
-    let trace = reference
-      ? NO_TRACE
-      : traceRequest(info.url, info.headers, (k, v) => orig.setRequestHeader.call(this, k, v));
-    const send = () => {
-      try {
-        return orig.send.call(this, body);
-      } finally {
-        if (reference) trace = traceOf(info.headers);
-      }
-    };
-
-    if (this.__oodleFetch) {
-      // The fetch wrapper records this request, with this trace.
-      try {
-        return send();
-      } finally {
-        this.__oodleTrace = trace;
-      }
-    }
-
-    const start = now();
-    let reported = false;
-    // The app cancelled the request (abort fires before loadend).
-    let aborted = false;
-    const done = () => {
-      if (reported) return;
-      reported = true;
-      const status = this.status || 0;
-      const duration = Math.round(now() - start);
-      emitResource(info.method, info.url, status, duration, xhrResponseSize(this), 'xhr', trace, aborted);
-    };
+    const afterSend = guard(() => beforeXhrSend(this, orig), null);
     try {
-      this.addEventListener('abort', () => {
-        aborted = true;
-      });
-      this.addEventListener('loadend', done);
-    } catch {
-      // older XHR without addEventListener: fall back to readyState
-      const prev = this.onreadystatechange;
-      this.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
-        if (this.readyState === 4) done();
-        if (prev) return (prev as (e: Event) => unknown).call(this, ev);
-      } as XMLHttpRequest['onreadystatechange'];
+      return orig.send.call(this, body);
+    } finally {
+      if (afterSend) guard(afterSend);
     }
-    return send();
   };
+}
+
+/**
+ * The SDK's work before an XHR of the app is sent: trace headers, and the
+ * listeners that record it. Gives the work to do after the send, or null.
+ */
+function beforeXhrSend(xhr: TrackedXHR & XMLHttpRequest, orig: XHRProto): (() => void) | null {
+  const info = xhr.__oodle;
+  const config = getConfig();
+  if (!info || xhr[INTERNAL_REQUEST] || !config || isCollectorUrl(info.url)) return null;
+
+  // Trace headers go on the XHR, also for a fetch that runs on XHR: here
+  // the headers that another SDK sets on the XHR are seen. When the reference SDK
+  // will add its own, Oodle adds none and reads the reference SDK's after it set
+  // them: before the send when the reference SDK's tracking wraps Oodle's, in the
+  // send when Oodle's wraps the reference SDK's (it sets them through the
+  // setRequestHeader above).
+  const reference = referenceTraces(xhr);
+  let trace = reference
+    ? NO_TRACE
+    : traceRequest(info.url, info.headers, (k, v) => orig.setRequestHeader.call(xhr, k, v));
+  const readReferenceTrace = () => {
+    if (reference) trace = traceOf(info.headers);
+  };
+
+  if (xhr.__oodleFetch) {
+    // The fetch wrapper records this request, with this trace.
+    return () => {
+      readReferenceTrace();
+      xhr.__oodleTrace = trace;
+    };
+  }
+
+  const start = now();
+  let reported = false;
+  // The app cancelled the request (abort fires before loadend).
+  let aborted = false;
+  const done = () => {
+    if (reported) return;
+    reported = true;
+    const status = xhr.status || 0;
+    const duration = Math.round(now() - start);
+    emitResource(info.method, info.url, status, duration, xhrResponseSize(xhr), 'xhr', trace, aborted);
+  };
+  const onAbort = () => {
+    aborted = true;
+  };
+  try {
+    xhr.addEventListener('abort', guarded(onAbort));
+    xhr.addEventListener('loadend', guarded(done));
+  } catch {
+    // older XHR without addEventListener: fall back to readyState
+    const prev = xhr.onreadystatechange;
+    xhr.onreadystatechange = function (this: XMLHttpRequest, ev: Event) {
+      guard(() => {
+        if (this.readyState === 4) done();
+      });
+      if (prev) return (prev as (e: Event) => unknown).call(this, ev);
+    } as XMLHttpRequest['onreadystatechange'];
+  }
+  return readReferenceTrace;
 }
 
 /**
@@ -393,7 +407,6 @@ function installFetchTracking() {
   originalFetch = original;
 
   g.fetch = function (this: unknown, input: unknown, init?: Record<string, unknown>) {
-    const config = getConfig();
     const call = (args: Record<string, unknown> | undefined) => {
       fetchDepth++;
       try {
@@ -402,29 +415,11 @@ function installFetchTracking() {
         fetchDepth--;
       }
     };
-    const { url, method, headers } = fetchRequest(input, init);
-    if (!config || !url || isCollectorUrl(url)) return call(init);
-
-    // A fetch that runs on XHR gets its trace headers on its XHR (the XHR
-    // hook above). Only a fetch that does not, as Expo's native fetch, gets
-    // them here.
-    const onXhr = fetchRunsOnXhr();
-    const map = headerMap(headers);
-    const added: Record<string, string> = {};
-    const fetchTrace = onXhr
-      ? NO_TRACE
-      : traceRequest(url, map, (k, v) => {
-          added[k] = v;
-        });
-    let args = init;
-    if (Object.keys(added).length > 0) {
-      // A copy of the headers with the trace headers added; the app's own
-      // objects are not changed.
-      const merged: Record<string, string> = {};
-      map.forEach((v, k) => (merged[k] = v));
-      Object.assign(merged, added);
-      args = { ...(init ?? {}), headers: merged };
-    }
+    // The SDK's work runs in guard(), and the app's fetch outside it: a
+    // failure in the SDK leaves the call, its result and its error as
+    // they were.
+    const plan = guard(() => planFetch(input, init), null);
+    if (!plan) return call(init);
 
     const start = now();
     // React Native's own fetch opens an XHR during the call. Expo's native
@@ -434,38 +429,82 @@ function installFetchTracking() {
     let pending: Promise<FetchResponse>;
     let xhr: XMLHttpRequest | null = null;
     try {
-      pending = call(args);
+      pending = call(plan.args);
       xhr = fetchXhr;
     } catch (e) {
-      xhr = fetchXhr;
-      const t = (xhr as TrackedXHR | null)?.__oodleTrace ?? fetchTrace;
-      emitResource(method, url, 0, Math.round(now() - start), 0, xhr ? 'xhr' : 'fetch', t);
+      const failed = fetchXhr as XMLHttpRequest | null;
+      guard(() => {
+        const t = (failed as TrackedXHR | null)?.__oodleTrace ?? plan.trace;
+        emitResource(plan.method, plan.url, 0, Math.round(now() - start), 0, failed ? 'xhr' : 'fetch', t);
+      });
       throw e;
     } finally {
       fetchXhr = null;
     }
+    // A fetch that another library replaced can give something that is not a promise.
+    if (typeof pending?.then !== 'function') return pending;
     if (xhr) fetchOpenedXhr = true;
     const type = xhr ? 'xhr' : 'fetch';
     // The trace that the request carries: from its XHR, or added here.
-    const trace = () => (xhr as TrackedXHR | null)?.__oodleTrace ?? fetchTrace;
+    const trace = () => (xhr as TrackedXHR | null)?.__oodleTrace ?? plan.trace;
     return pending.then(
       (res) => {
-        let size = 0;
-        try {
-          size = parseInt(res?.headers?.get?.('content-length') ?? '', 10) || 0;
-        } catch {
-          // a response without readable headers
-        }
-        if (!size && xhr) size = xhrResponseSize(xhr);
-        emitResource(method, url, res?.status ?? 0, Math.round(now() - start), size, type, trace());
+        guard(() => {
+          let size = 0;
+          try {
+            size = parseInt(res?.headers?.get?.('content-length') ?? '', 10) || 0;
+          } catch {
+            // a response without readable headers
+          }
+          if (!size && xhr) size = xhrResponseSize(xhr);
+          emitResource(plan.method, plan.url, res?.status ?? 0, Math.round(now() - start), size, type, trace());
+        });
         return res;
       },
       (err: unknown) => {
-        emitResource(method, url, 0, Math.round(now() - start), 0, type, trace(), isAbort(err, args));
+        guard(() =>
+          emitResource(plan.method, plan.url, 0, Math.round(now() - start), 0, type, trace(), isAbort(err, plan.args)),
+        );
         throw err;
       },
     );
   } as Fetch;
+}
+
+/**
+ * The SDK's work before a fetch of the app: the request, and its
+ * arguments with trace headers added. Null when the SDK does not record
+ * the request.
+ */
+function planFetch(
+  input: unknown,
+  init: Record<string, unknown> | undefined,
+): { url: string; method: string; args: Record<string, unknown> | undefined; trace: Trace } | null {
+  const config = getConfig();
+  const { url, method, headers } = fetchRequest(input, init);
+  if (!config || !url || isCollectorUrl(url)) return null;
+
+  // A fetch that runs on XHR gets its trace headers on its XHR (the XHR
+  // hook above). Only a fetch that does not, as Expo's native fetch, gets
+  // them here.
+  const onXhr = fetchRunsOnXhr();
+  const map = headerMap(headers);
+  const added: Record<string, string> = {};
+  const trace = onXhr
+    ? NO_TRACE
+    : traceRequest(url, map, (k, v) => {
+        added[k] = v;
+      });
+  let args = init;
+  if (Object.keys(added).length > 0) {
+    // A copy of the headers with the trace headers added; the app's own
+    // objects are not changed.
+    const merged: Record<string, string> = {};
+    map.forEach((v, k) => (merged[k] = v));
+    Object.assign(merged, added);
+    args = { ...(init ?? {}), headers: merged };
+  }
+  return { url, method, args, trace };
 }
 
 /** True when a fetch failed because the app aborted it (AbortController). */

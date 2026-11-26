@@ -8,6 +8,7 @@ import { drainNativeEvents } from './errors';
 import { releaseTap } from './held-tap';
 import { startLongTaskTracking, stopLongTaskTracking } from './longtasks';
 import { flushActiveView, pauseViews, resumeViews } from './views';
+import { guarded, safeInterval } from '../core/guard';
 
 /**
  * The app state field of the OpenTelemetry `device.app.lifecycle` event
@@ -35,7 +36,7 @@ export function isForeground(): boolean {
 
 function startDrain() {
   if (drainTimer) return;
-  drainTimer = setInterval(drainNativeEvents, NATIVE_DRAIN_MS);
+  drainTimer = safeInterval(drainNativeEvents, NATIVE_DRAIN_MS);
 }
 
 function stopDrain() {
@@ -94,7 +95,7 @@ export function installLifecycle(h: LifecycleHooks) {
   hooks = h;
   if (subscription) return;
   foreground = AppState.currentState !== 'background';
-  subscription = AppState.addEventListener('change', onChange);
+  subscription = AppState.addEventListener('change', guarded(onChange));
   if (foreground) {
     startDrain();
     startLongTaskTracking();

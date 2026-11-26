@@ -24,6 +24,7 @@ import {
   type WireframeSnapshot,
 } from './rrweb';
 import { clockOffset } from '../core/clock';
+import { guardPromise, safeInterval, safeTimeout } from '../core/guard';
 
 /** Snapshot interval while nothing prompts one. Unchanged screens send nothing. */
 const CAPTURE_INTERVAL_MS = 1000;
@@ -133,7 +134,7 @@ function push(events: RRWebEvent[]) {
   if (segment.length >= SEGMENT_MAX_EVENTS || segmentBytes >= SEGMENT_MAX_BYTES) {
     flushSegment();
   } else if (!segmentTimer) {
-    segmentTimer = setTimeout(() => flushSegment(), SEGMENT_MAX_AGE_MS);
+    segmentTimer = safeTimeout(() => flushSegment(), SEGMENT_MAX_AGE_MS);
   }
 }
 
@@ -177,12 +178,12 @@ async function capture() {
 function scheduleFollowUps(delays: readonly number[] = FOLLOW_UP_DELAYS_MS) {
   if (!recording) return;
   for (const t of followUps) clearTimeout(t);
-  followUps = delays.map((d) => setTimeout(() => void capture(), d));
+  followUps = delays.map((d) => safeTimeout(() => guardPromise(capture()), d));
 }
 
 function startLoop() {
   if (captureTimer) return;
-  captureTimer = setInterval(() => void capture(), CAPTURE_INTERVAL_MS);
+  captureTimer = safeInterval(() => guardPromise(capture()), CAPTURE_INTERVAL_MS);
 }
 
 function stopLoop() {
@@ -202,7 +203,7 @@ export function syncRecording() {
     recording = true;
     pendingFull = true;
     startLoop();
-    void capture();
+    guardPromise(capture());
   } else {
     recording = false;
     stopLoop();

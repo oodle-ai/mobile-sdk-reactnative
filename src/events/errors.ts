@@ -4,6 +4,7 @@ import { native, storage, type NativeCrash } from '../core/native';
 import { holdSends, persistOutbox } from '../core/transport';
 import { attributesJSON, emit, emitRaw } from './emit';
 import { isoTime } from '../core/clock';
+import { guard, guarded } from '../core/guard';
 
 const MAX_STACK_CHARS = 16_000;
 const MAX_MESSAGE_CHARS = 4_000;
@@ -125,9 +126,12 @@ function errorUtils(): ErrorUtilsLike | null {
 function handleGlobalError(error: unknown, isFatal?: boolean) {
   // A second fatal error while the first waits is the same crash.
   const record = !(isFatal && fatalPending);
-  try {
+  // An SDK failure here must never stop the app's own handler.
+  guard(() => {
     if (record) addError(error, undefined, 'source', Boolean(isFatal));
     if (isFatal && record) {
+      // The marker only after the crash is recorded: it makes the next
+      // start drop the native copy of this crash.
       storage.set(JS_CRASH_MARKER_KEY, String(Date.now()));
       saveLastContext();
       persistOutbox({ sync: true });
@@ -135,9 +139,7 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
       // the handoff could send it too, and it would count two times.
       holdSends(true);
     }
-  } catch {
-    // never stop the app's own handler from running
-  }
+  });
   const next = previousHandler;
   if (!next) return;
   if (!isFatal) {
@@ -145,12 +147,16 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
     return;
   }
   fatalPending = true;
+  // unguarded: the timer runs the app's handler, and an exception from it is the app's.
   setTimeout(() => {
     fatalPending = false;
-    next(error, isFatal);
-    // A handler that did not end the app (a dev build shows the error
-    // and goes on): send again.
-    holdSends(false);
+    try {
+      next(error, isFatal);
+    } finally {
+      // A handler that did not end the app (a dev build shows the error
+      // and goes on): send again.
+      guard(() => holdSends(false));
+    }
   }, FATAL_HANDOFF_DELAY_MS);
 }
 
@@ -188,13 +194,13 @@ function installPromiseRejectionTracking() {
   // development build the warning it showed is kept.
   hermes.enablePromiseRejectionTracker({
     allRejections: true,
-    onUnhandled(_id, rejection) {
+    onUnhandled: guarded((_id: number, rejection: unknown) => {
       addError(rejection, undefined, 'promise');
       if (dev) {
         const n = normalizeError(rejection);
         originalConsole.warn?.(`Possible unhandled promise rejection: ${n.message}`);
       }
-    },
+    }),
     onHandled() {},
   });
 }
@@ -222,6 +228,17 @@ function consoleText(args: unknown[]): string {
 
 let inConsole = false;
 
+function recordConsole(level: 'error' | 'warn', args: unknown[]) {
+  if (inConsole || (typeof args[0] === 'string' && args[0].startsWith(LOG_PREFIX))) return;
+  inConsole = true;
+  try {
+    // A log line is not user activity.
+    emit({ event_type: 'console', console_level: level, console_message: consoleText(args) }, false);
+  } finally {
+    inConsole = false;
+  }
+}
+
 export function installConsoleTracking() {
   if (consoleInstalled) return;
   consoleInstalled = true;
@@ -229,18 +246,8 @@ export function installConsoleTracking() {
     const orig = console[level];
     originalConsole[level] = orig.bind(console);
     console[level] = (...args: unknown[]) => {
-      if (!inConsole && !(typeof args[0] === 'string' && args[0].startsWith(LOG_PREFIX))) {
-        inConsole = true;
-        try {
-          // A log line is not user activity.
-          emit({ event_type: 'console', console_level: level, console_message: consoleText(args) }, false);
-        } catch {
-          // ignore
-        } finally {
-          inConsole = false;
-        }
-      }
-      orig.apply(console, args);
+      guard(() => recordConsole(level, args));
+      return orig.apply(console, args);
     };
   }
 }

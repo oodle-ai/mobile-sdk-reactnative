@@ -2,6 +2,7 @@ import { getConfig } from '../core/config';
 import { isSessionSampled } from '../core/session';
 import { emit } from './emit';
 import { isoTime } from '../core/clock';
+import { safeTimeout } from '../core/guard';
 
 /**
  * A timer that should fire every TICK_MS. It runs only in the foreground,
@@ -31,7 +32,7 @@ function tick() {
     );
   }
   expected = now + TICK_MS;
-  timer = setTimeout(tick, TICK_MS);
+  timer = safeTimeout(tick, TICK_MS);
 }
 
 export function startLongTaskTracking() {
@@ -39,7 +40,7 @@ export function startLongTaskTracking() {
   // The events of a session that is not sampled are not sent.
   if (!isSessionSampled()) return;
   expected = Date.now() + TICK_MS;
-  timer = setTimeout(tick, TICK_MS);
+  timer = safeTimeout(tick, TICK_MS);
 }
 
 export function stopLongTaskTracking() {

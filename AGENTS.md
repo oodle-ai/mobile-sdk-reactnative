@@ -108,6 +108,34 @@ keeps these rules (`src/core/transport.ts`):
   JS thread. Android compresses a string body itself. The envelope header
   has `sdk_name: "react-native"` and `sdk_version`.
 
+## A bug in the SDK never reaches the app
+
+An exception that leaves SDK code ends a release app, and the app's
+owners cannot fix it. All SDK code that the app's thread runs goes
+through `src/core/guard.ts`:
+
+- The public API objects are made with `guardApi`.
+- Timers use `safeTimeout`, `safeInterval` and `safeFrame`. A listener
+  is given as `guarded(fn)` at the call that adds it. A promise that
+  nothing waits for ends in `guardPromise`. `test/guard.test.ts` fails
+  on a raw timer, listener or `void` promise in `src/`. A callback that
+  must run the app's code outside the guard has a comment
+  `// unguarded: <reason>` on the line before it.
+- In a wrapper around an app function (fetch, XHR, console,
+  `React.createElement`, a press handler, the global error handler), the
+  SDK's part runs in `guard()` and the app's function runs outside it.
+  Its result, its exceptions and its arguments reach the app unchanged.
+  When the SDK's part fails, the app's call goes on as with no SDK.
+- Code at module load runs outside any call of the app. Keep it to
+  declarations; put a call there in `guard()`.
+
+`test/chaos.test.ts` breaks one part at a time (the native module throws
+or gives values of the wrong form, the collector fails, each SDK module's
+functions throw) and runs the same app script as with no SDK. The app
+must see the same results, errors, console lines and global handler
+calls, with no exception from a timer and no promise left rejected. A
+new hook into the app needs a step in that script.
+
 ## Only user activity starts a session
 
 A session ends after 15 minutes without user activity (`SESSION_TIMEOUT_MS`).

@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { logger } from '../core/logger';
 import { OodleRum } from '../rum';
+import { guard, guarded, safeInterval } from '../core/guard';
 
 /** The parts of a react-navigation container ref the SDK uses. */
 export interface NavigationRefLike {
@@ -16,7 +17,8 @@ interface NavigationContainerLike {
   isReady?(): boolean;
 }
 
-function container(ref: NavigationRefLike): NavigationContainerLike | null {
+function container(ref: NavigationRefLike | null | undefined): NavigationContainerLike | null {
+  if (!ref) return null;
   // createNavigationContainerRef() returns the container itself; useRef()
   // holds it in `current`.
   if (typeof ref.getCurrentRoute === 'function' && typeof ref.addListener === 'function') {
@@ -44,6 +46,13 @@ const FIND_TRIES = 300;
  * is looked at again until it is set, for up to a minute.
  */
 export function trackNavigation(ref: NavigationRefLike, options: NavigationTrackingOptions = {}): () => void {
+  // It runs in the app's effect, and the function it gives in the effect's cleanup.
+  return guarded(guard(() => trackRef(ref, options), noop));
+}
+
+function noop() {}
+
+function trackRef(ref: NavigationRefLike, options: NavigationTrackingOptions): () => void {
   let detach: (() => void) | null = null;
   const attach = () => {
     const nav = container(ref);
@@ -52,7 +61,7 @@ export function trackNavigation(ref: NavigationRefLike, options: NavigationTrack
   };
   if (attach()) return () => detach?.();
   let tries = 0;
-  let find: ReturnType<typeof setInterval> | null = setInterval(() => {
+  let find: ReturnType<typeof setInterval> | null = safeInterval(() => {
     tries++;
     if (attach() || tries >= FIND_TRIES) {
       if (find) clearInterval(find);
@@ -75,7 +84,7 @@ function trackContainer(nav: NavigationContainerLike, options: NavigationTrackin
     if (name === null) return;
     OodleRum.startView(route.key, name);
   };
-  const unsubscribe = nav.addListener('state', update);
+  const unsubscribe = nav.addListener('state', guarded(update));
   // A container that is not ready yet has no route. Its first state may
   // not fire a 'state' event, so readiness is polled for a short time.
   let tries = 0;
@@ -83,7 +92,7 @@ function trackContainer(nav: NavigationContainerLike, options: NavigationTrackin
   if (!nav.isReady || nav.isReady()) {
     update();
   } else {
-    poll = setInterval(() => {
+    poll = safeInterval(() => {
       tries++;
       if (nav.isReady?.()) update();
       if ((nav.isReady?.() || tries >= 50) && poll) {

@@ -11,6 +11,7 @@
  */
 
 import React from 'react';
+import { guard } from '../core/guard';
 
 // Metro and the tests give each module its own `require`. The call must
 // name the module, so that Metro bundles it.
@@ -36,11 +37,8 @@ function wrap(fn: Handler): Handler {
   let w = wrappers.get(fn);
   if (!w) {
     w = function (this: unknown, ...args: unknown[]) {
-      try {
-        listener?.();
-      } catch {
-        // instrumentation must never stop a press
-      }
+      // Instrumentation must never stop a press.
+      guard(() => listener?.());
       return fn.apply(this, args);
     };
     wrappers.set(fn, w);
@@ -71,7 +69,8 @@ function patch(owner: unknown, name: string): boolean {
   const create = original as CreateElement;
   try {
     o[name] = function (this: unknown, type: unknown, props: unknown, ...rest: unknown[]) {
-      return create.call(this, type, withPressHandlers(props), ...rest);
+      // A failure in the SDK gives the app's props as they were.
+      return create.call(this, type, guard(() => withPressHandlers(props), props), ...rest);
     };
   } catch {
     return false;
