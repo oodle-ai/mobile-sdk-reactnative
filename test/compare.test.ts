@@ -750,13 +750,16 @@ describe('js-thread-profile.mjs', () => {
     expect(s.frames.get('hermes::vm::Interpreter::interpretFunction (hermes)')).toBe(40);
   });
 
-  it('reports the busy samples and the app frames of each SDK', () => {
+  it('reports the share of each app frame in the busy samples, each launch with the same weight', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-thread-'));
+    // 30 of 40 busy samples, and 10 of 40: a mean share of 50%.
     fs.writeFileSync(path.join(dir, 'soak-oodle-off-rprofile-1.txt'), sample(30));
+    fs.writeFileSync(path.join(dir, 'soak-oodle-off-rprofile-2.txt'), sample(10));
     fs.writeFileSync(path.join(dir, 'soak-none-off-rprofile-1.txt'), sample(0));
     const md = jsThreadReport(dir);
-    expect(md).toContain('| oodle | 1 | 100 | 40 |');
-    expect(md).toContain('| 30 | `-[OodleRum storageSet:value:]` |');
+    expect(md).toContain('**oodle** (2 launches)');
+    expect(md).toContain('| 50.0% | `-[OodleRum storageSet:value:]` |');
+    expect(md).toMatch(/\*\*none\*\* \(1 launches\)[^*]*None\./);
     // The run loop frame holds every sample of the thread: not listed.
     expect(md).not.toContain('RCTJSThreadManager');
     expect(jsThreadReport(path.join(dir, 'none'))).toContain('No sample of the JS thread.');

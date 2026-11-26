@@ -64,11 +64,17 @@ export function report(dir, top = 12) {
     const parsed = jsThreadNodes(fs.readFileSync(path.join(dir, f), 'utf8'));
     if (!parsed) continue;
     const s = summarize(parsed);
-    const p = byProvider.get(providerOf(f)) ?? { files: 0, total: 0, busy: 0, frames: new Map() };
+    if (s.busy <= 0) continue;
+    const p = byProvider.get(providerOf(f)) ?? { files: 0, shares: new Map() };
     p.files += 1;
-    p.total += s.total;
-    p.busy += s.busy;
-    for (const [k, v] of s.frames) p.frames.set(k, (p.frames.get(k) ?? 0) + v);
+    // The share of each frame in the busy samples of this launch. The
+    // real rate of `sample` changes (in one run, 8378 and 135081 samples
+    // in the same 19 s), so a launch gives shares, not times, and each
+    // launch has the same weight.
+    for (const [k, v] of s.frames) {
+      if (v >= s.total) continue;
+      p.shares.set(k, (p.shares.get(k) ?? 0) + Math.min(v, s.busy) / s.busy);
+    }
     byProvider.set(providerOf(f), p);
   }
   const out = ['### JS thread samples (iOS)', ''];
@@ -77,21 +83,25 @@ export function report(dir, top = 12) {
     return out.join('\n') + '\n';
   }
   out.push(
-    'From macOS `sample` (every 1 ms) during the walk, in a pass of its own after the cost rounds: the sampler slows the app, so these launches are not in the table above. Busy: samples not waiting for work. A frame counts the samples of the frames that it calls; frames of the app binary and its pods, which include the native code of the SDKs.',
-    '',
-    '| SDK | Launches | Samples | Busy |',
-    '|---|---|---|---|',
+    'From macOS `sample` during the walk, in a pass of its own after the cost rounds: the sampler slows the app, so these launches are not in the table above. The real rate of `sample` changes from launch to launch, so this section names the native code on the JS thread but does not measure its time: the CPU time of the JS thread is in the table above. Each row gives the mean share of a frame in the busy samples of a launch (samples not waiting for work); a frame includes the frames that it calls. Only frames of the app binary are listed: it includes the native code of the SDKs. The walk blocks the JS thread for 400 ms in `Date.now()` for the forced long task, with each SDK.',
   );
-  for (const [p, s] of byProvider) out.push(`| ${p} | ${s.files} | ${s.total} | ${s.busy} |`);
   const app = /^(OodleExample)$/;
   for (const [p, s] of byProvider) {
-    const rows = [...s.frames]
-      .filter(([k, v]) => app.test(/\(([^()]+)\)$/.exec(k)?.[1] ?? '') && v < s.total)
+    const rows = [...s.shares]
+      .filter(([k, v]) => v > 0 && app.test(/\(([^()]+)\)$/.exec(k)?.[1] ?? ''))
+      .map(([k, v]) => [k, v / s.files])
       .sort((a, b) => b[1] - a[1])
       .slice(0, top);
-    out.push('', `**${p}**: the frames of the app binary with the most samples`, '');
-    out.push('| Samples | Frame |', '|---|---|');
-    for (const [k, v] of rows) out.push(`| ${v} | \`${k.replace(/ \([^()]+\)$/, '').replace(/\|/g, '\\|').slice(0, 160)}\` |`);
+    out.push('', `**${p}** (${s.files} launches): the frames of the app binary with the most samples`, '');
+    if (rows.length === 0) {
+      out.push('None.');
+      continue;
+    }
+    out.push('| Share of busy | Frame |', '|---|---|');
+    for (const [k, v] of rows) {
+      const share = v * 100 >= 0.1 ? `${(v * 100).toFixed(1)}%` : '<0.1%';
+      out.push(`| ${share} | \`${k.replace(/ \([^()]+\)$/, '').replace(/\|/g, '\\|').slice(0, 160)}\` |`);
+    }
   }
   return out.join('\n') + '\n';
 }
