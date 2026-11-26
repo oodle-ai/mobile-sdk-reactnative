@@ -11,6 +11,7 @@ import {
   safeTimeout,
   takeCaughtErrors,
 } from '../src/core/guard';
+import { takeTelemetry } from '../src/core/telemetry';
 
 const SRC = path.resolve(__dirname, '../src');
 
@@ -197,6 +198,16 @@ describe('guard', () => {
     expect(guard(boom, 0)).toBe(0);
     expect(guard(boom)).toBeUndefined();
     expect(takeCaughtErrors()).toBe(2);
+  });
+
+  it('counts each caught exception in the SDK telemetry (sdk_internal_errors)', () => {
+    takeTelemetry();
+    expect(guard(() => 1, 0)).toBe(1);
+    expect(takeTelemetry()).toBeNull();
+    guard(boom);
+    guarded(boom)();
+    expect(takeTelemetry()?.sdk_internal_errors).toBe(2);
+    expect(takeTelemetry()).toBeNull();
   });
 
   it('keeps `this` and the arguments in a guarded callback', () => {

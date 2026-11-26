@@ -734,6 +734,23 @@ describe('OodleRum end to end', () => {
     expect(events('custom').find((c) => c.custom_event_name === 'timing:content_ready')).toBeDefined();
   });
 
+  it('sends the number of exceptions that the guard caught in the SDK telemetry', async () => {
+    // Tags whose keys cannot be read: the SDK fails, and the app's call returns.
+    const hostile = new Proxy(
+      {},
+      {
+        ownKeys() {
+          throw new Error('app value');
+        },
+      },
+    );
+    expect(() => sdk.OodleRum.setTags(hostile as never)).not.toThrow();
+    // The telemetry goes out every 60 s.
+    await settle(61_000);
+    const telemetry = all('sdk_telemetry');
+    expect(telemetry.reduce((n, t) => n + Number(t.sdk_internal_errors ?? 0), 0)).toBeGreaterThanOrEqual(1);
+  });
+
   it('records a replay as rrweb segments and marks events with replay_id', async () => {
     expect(sdk.OodleSessionReplay.isRecording()).toBe(true);
     // Count captures from a known state: a view change asks for a full

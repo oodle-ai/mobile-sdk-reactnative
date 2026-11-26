@@ -13,13 +13,15 @@
  *   handler): `guard` runs the SDK's part, and the app's function runs
  *   outside it, so its result and its exceptions reach the app unchanged.
  *
- * An exception in SDK code is logged and gives a fallback value. It never
- * reaches the app. `test/guard.test.ts` fails on a timer or listener
+ * An exception in SDK code is logged, counted (`sdk_internal_errors` in
+ * the SDK telemetry), and gives a fallback value. It never reaches the
+ * app. `test/guard.test.ts` fails on a timer or listener
  * outside this module, and `test/chaos.test.ts` makes SDK code fail in
  * each place and checks that the app sees no difference.
  */
 
 import { logger } from './logger';
+import { incrTelemetry } from './telemetry';
 
 let caught = 0;
 let warned = false;
@@ -27,6 +29,7 @@ let warned = false;
 function report(e: unknown) {
   caught++;
   try {
+    incrTelemetry('sdk_internal_errors');
     // The first one is a warning, so a developer sees it. More are
     // usually the same bug again.
     if (!warned) {

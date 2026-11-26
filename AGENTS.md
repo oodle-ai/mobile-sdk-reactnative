@@ -112,7 +112,9 @@ keeps these rules (`src/core/transport.ts`):
 
 An exception that leaves SDK code ends a release app, and the app's
 owners cannot fix it. All SDK code that the app's thread runs goes
-through `src/core/guard.ts`:
+through `src/core/guard.ts`. The guard logs each exception that it
+catches and counts it in the SDK telemetry (`sdk_internal_errors`): with
+no crash, that counter is the only sign of an SDK bug.
 
 - The public API objects are made with `guardApi`.
 - Timers use `safeTimeout`, `safeInterval` and `safeFrame`. A listener
