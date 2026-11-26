@@ -26,6 +26,7 @@ object CrashReporter {
     if (installed) return true
     val dir = Storage.directory(context).apply { mkdirs() }
     val previous = Thread.getDefaultUncaughtExceptionHandler()
+    // unguarded: it must pass the crash on; its SDK part is in the try below.
     Thread.setDefaultUncaughtExceptionHandler { thread, error ->
       try {
         if (!alreadyReportedByJs(error, storage)) write(dir, thread, error)

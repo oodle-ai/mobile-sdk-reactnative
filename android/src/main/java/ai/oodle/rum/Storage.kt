@@ -35,13 +35,15 @@ class Storage(context: Context) {
   fun setAsync(key: String, value: String, done: (Boolean) -> Unit) {
     val version = synchronized(LOCK) { bump(key) }
     EXECUTOR.execute {
-      val ok =
-        try {
-          synchronized(LOCK) { if (VERSIONS[versionKey(key)] != version) true else write(key, value) }
-        } catch (_: Throwable) {
-          false
-        }
-      done(ok)
+      safely {
+        val ok =
+          try {
+            synchronized(LOCK) { if (VERSIONS[versionKey(key)] != version) true else write(key, value) }
+          } catch (_: Throwable) {
+            false
+          }
+        done(ok)
+      }
     }
   }
 

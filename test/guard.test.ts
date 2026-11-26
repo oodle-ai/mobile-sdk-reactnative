@@ -84,6 +84,104 @@ describe('the boundary between the app and the SDK', () => {
   });
 });
 
+// --- Native code ---
+
+const ROOT = path.resolve(__dirname, '..');
+
+function filesIn(dir: string, ext: RegExp): string[] {
+  return readdirSync(dir).flatMap((name) => {
+    const p = path.join(dir, name);
+    if (statSync(p).isDirectory()) return filesIn(p, ext);
+    return ext.test(name) ? [p] : [];
+  });
+}
+
+/** The code of a line, without its string literals and its comment. */
+function codeOf(line: string): string {
+  return line.replace(/"([^"\\]|\\.)*"/g, '""').replace(/\/\/.*$/, '');
+}
+
+/** True when the line before has a comment `// <tag>: <reason>`. */
+function justified(lines: string[], i: number, tag: string): boolean {
+  return new RegExp(`^\\s*// ${tag}: \\S`).test(lines[i - 1] ?? '');
+}
+
+/** Kotlin blocks and methods that the platform calls on a thread of its own or on the main thread. */
+const KOTLIN_CALLBACKS = [
+  /\.post\s*\{/,
+  /\.postDelayed\s*\(\s*\{/,
+  /\.postAtFrontOfQueue\s*\{/,
+  /runOnUiThread\s*\{/,
+  /\.(execute|submit)\s*\{/,
+  /\bThread\s*\(\s*\{/,
+  /(?<!:\s*)\bRunnable\s*\{/,
+  /setDefaultUncaughtExceptionHandler\s*\{/,
+  /\bOn\w*Listener\s*\{/,
+  /\boverride fun (run|doFrame|onHost\w+|uncaughtException|onReceive|onAvailable|onLost|onCapabilitiesChanged|onTrimMemory|onLowMemory|onConfigurationChanged|onGlobalLayout|onPreDraw|onDraw)\(/,
+];
+
+/** Swift that traps: a force cast, a force try, a force unwrap, an integer conversion. */
+const SWIFT_TRAPS: Array<[string, RegExp]> = [
+  ['force', /\bas!/],
+  ['force', /\btry!/],
+  // A force unwrap: a ! after a name, ) or ], but not the ! of as! and try!.
+  ['force', /(?<=[\w)\]])(?<!\bas|\btry)!(?!=)/],
+  ['trap-free', /(?<![\w.])(Int|Int8|Int16|Int32|Int64|UInt|UInt8|UInt16|UInt32|UInt64)\((?!bitPattern:|truncatingIfNeeded:|clamping:)/],
+];
+
+describe('the boundary between the app and the SDK in native code', () => {
+  it('runs the body of each Kotlin callback of the platform in safely { } or safe()', () => {
+    // The callback's line has the guard, or its next line of code starts with it.
+    const found: string[] = [];
+    for (const file of filesIn(path.join(ROOT, 'android/src'), /\.kt$/)) {
+      const lines = readFileSync(file, 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        const code = codeOf(line);
+        if (!KOTLIN_CALLBACKS.some((re) => re.test(code))) return;
+        if (/\bsafely\s*\{|\bsafe\(/.test(code)) return;
+        const next = lines.slice(i + 1).find((l) => l.trim() !== '' && !/^\s*\/\//.test(l)) ?? '';
+        if (/^\s*(safely\s*\{|safe\()/.test(next)) return;
+        if (justified(lines, i, 'unguarded')) return;
+        found.push(`${path.relative(ROOT, file)}:${i + 1}: ${line.trim()}`);
+      });
+    }
+    expect(found, 'Put the body in safely { } (android/src/main/java/ai/oodle/rum/Safe.kt)').toEqual([]);
+  });
+
+  it('has no Swift that traps without a reason', () => {
+    const found: string[] = [];
+    for (const file of filesIn(path.join(ROOT, 'ios'), /\.swift$/)) {
+      const lines = readFileSync(file, 'utf8').split('\n');
+      lines.forEach((line, i) => {
+        const code = codeOf(line);
+        for (const [tag, re] of SWIFT_TRAPS) {
+          if (re.test(code) && !justified(lines, i, tag)) {
+            found.push(`${path.relative(ROOT, file)}:${i + 1}: ${line.trim()} (// ${tag}: <reason>)`);
+          }
+        }
+      });
+    }
+    expect(found, 'Use finiteInt or finiteInt64 (ios/OodleRumImpl.swift), or give the reason').toEqual([]);
+  });
+
+  it('finds what the native checks look for', () => {
+    const kotlin = (s: string) => KOTLIN_CALLBACKS.some((re) => re.test(codeOf(s)));
+    expect(kotlin('    main.post { step() }')).toBe(true);
+    expect(kotlin('  override fun doFrame(frameTimeNanos: Long) {')).toBe(true);
+    expect(kotlin('    worker.execute {')).toBe(true);
+    expect(kotlin('    h.post(sampleTask)')).toBe(false);
+    const swift = (s: string) => SWIFT_TRAPS.filter(([, re]) => re.test(codeOf(s))).map(([tag]) => tag);
+    expect(swift('let a = b as! CGImage')).toEqual(['force']);
+    expect(swift('let a = try! f()')).toEqual(['force']);
+    expect(swift('let w = view.window!.frame')).toEqual(['force']);
+    expect(swift('let n = Int(size.width)')).toEqual(['trap-free']);
+    expect(swift('if a != b && !c { }')).toEqual([]);
+    expect(swift('let s = "Hello!"')).toEqual([]);
+    expect(swift('let u = UInt8(bitPattern: v)')).toEqual([]);
+    expect(swift('let n = finiteInt(size.width)')).toEqual([]);
+  });
+});
+
 describe('guard', () => {
   afterEach(() => {
     vi.useRealTimers();

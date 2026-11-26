@@ -109,6 +109,7 @@ object WireframeCapture {
   private fun track(roots: List<View>) {
     for (root in roots) {
       if (tracked.containsKey(root)) continue
+      // unguarded: an increment does not throw.
       val listener = ViewTreeObserver.OnDrawListener { drawTick++ }
       try {
         root.viewTreeObserver.addOnDrawListener(listener)
@@ -172,7 +173,7 @@ object WireframeCapture {
         }
         if (now - sliceStart >= SLICE_MS) {
           w.spentMs += now - sliceStart
-          main.post { step(w, width, height, resolve, reject) }
+          main.post { safely { step(w, width, height, resolve, reject) } }
           return
         }
         visit(w.stack.removeLast(), w)
@@ -185,14 +186,16 @@ object WireframeCapture {
       if (w.truncated) out.put("truncated", true)
       if (w.masks.length() > 0) out.put("masks", w.masks)
       worker.execute {
-        val text =
-          try {
-            out.toString()
-          } catch (t: Throwable) {
-            reject(t)
-            return@execute
-          }
-        resolve(text)
+        safely {
+          val text =
+            try {
+              out.toString()
+            } catch (t: Throwable) {
+              reject(t)
+              return@execute
+            }
+          resolve(text)
+        }
       }
     } catch (t: Throwable) {
       busy = false
@@ -625,21 +628,25 @@ object WireframeCapture {
       encoding[view] = true
       val ref = java.lang.ref.WeakReference(view)
       worker.execute {
-        val data =
-          try {
-            encode(bitmap)
-          } catch (_: Throwable) {
-            bitmap.recycle()
-            null
+        safely {
+          val data =
+            try {
+              encode(bitmap)
+            } catch (_: Throwable) {
+              bitmap.recycle()
+              null
+            }
+          main.post {
+            safely {
+              val v = ref.get() ?: return@post
+              encoding.remove(v)
+              if (data == null) return@post
+              val previous = pictures[v]?.data
+              pictures[v] = VectorPicture(key, data, SystemClock.uptimeMillis())
+              // The screen may not draw again: walk again to send the picture.
+              if (data != previous) lastSignature = null
+            }
           }
-        main.post {
-          val v = ref.get() ?: return@post
-          encoding.remove(v)
-          if (data == null) return@post
-          val previous = pictures[v]?.data
-          pictures[v] = VectorPicture(key, data, SystemClock.uptimeMillis())
-          // The screen may not draw again: walk again to send the picture.
-          if (data != previous) lastSignature = null
         }
       }
     } catch (_: Throwable) {

@@ -60,34 +60,38 @@ object Watchdog {
     val main = Handler(Looper.getMainLooper())
     val t =
       Thread({
-        try {
-          while (true) {
-            synchronized(gate) {
-              while (!(enabled && foreground)) gate.wait()
+        // An exception other than the interrupt of stop() ends the watchdog, not the app.
+        safely {
+          try {
+            while (true) {
+              synchronized(gate) {
+                while (!(enabled && foreground)) gate.wait()
+              }
+              val ran = CountDownLatch(1)
+              val postedAt = SystemClock.uptimeMillis()
+              // unguarded: countDown() does not throw.
+              main.post { ran.countDown() }
+              var stack: String? = null
+              // One wait to the threshold, not a poll every 100 ms.
+              if (!ran.await(thresholdMs, TimeUnit.MILLISECONDS)) {
+                // A paused debugger blocks the main thread on purpose.
+                if (!Debug.isDebuggerConnected()) stack = mainStack()
+                ran.await()
+              }
+              if (stack != null && foreground && enabled) {
+                val blocked = SystemClock.uptimeMillis() - postedAt
+                val e = JSONObject()
+                e.put("type", "anr")
+                e.put("timestamp", System.currentTimeMillis() - blocked)
+                e.put("duration_ms", blocked)
+                e.put("stack", stack)
+                NativeEvents.add(e)
+              }
+              Thread.sleep(PAUSE_MS)
             }
-            val ran = CountDownLatch(1)
-            val postedAt = SystemClock.uptimeMillis()
-            main.post { ran.countDown() }
-            var stack: String? = null
-            // One wait to the threshold, not a poll every 100 ms.
-            if (!ran.await(thresholdMs, TimeUnit.MILLISECONDS)) {
-              // A paused debugger blocks the main thread on purpose.
-              if (!Debug.isDebuggerConnected()) stack = mainStack()
-              ran.await()
-            }
-            if (stack != null && foreground && enabled) {
-              val blocked = SystemClock.uptimeMillis() - postedAt
-              val e = JSONObject()
-              e.put("type", "anr")
-              e.put("timestamp", System.currentTimeMillis() - blocked)
-              e.put("duration_ms", blocked)
-              e.put("stack", stack)
-              NativeEvents.add(e)
-            }
-            Thread.sleep(PAUSE_MS)
+          } catch (_: InterruptedException) {
+            // stopped
           }
-        } catch (_: InterruptedException) {
-          // stopped
         }
       }, "oodle-rum-watchdog")
     t.isDaemon = true

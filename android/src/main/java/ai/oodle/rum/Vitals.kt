@@ -49,16 +49,16 @@ object Vitals {
   private val sampleTask =
     object : Runnable {
       override fun run() {
-        sampleMemory()
-        synchronized(lock) { if (sampling) sampler?.postDelayed(this, MEMORY_SAMPLE_MS) }
+        safely { sampleMemory() }
+        safely { synchronized(lock) { if (sampling) sampler?.postDelayed(this, MEMORY_SAMPLE_MS) } }
       }
     }
 
   private val frameCallback =
     object : Choreographer.FrameCallback {
       override fun doFrame(frameTimeNanos: Long) {
-        onFrame(frameTimeNanos)
-        Choreographer.getInstance().postFrameCallback(this)
+        safely { onFrame(frameTimeNanos) }
+        safely { Choreographer.getInstance().postFrameCallback(this) }
       }
     }
 
@@ -106,8 +106,10 @@ object Vitals {
 
   private fun begin() {
     UiThreadUtil.runOnUiThread {
-      Choreographer.getInstance().removeFrameCallback(frameCallback)
-      Choreographer.getInstance().postFrameCallback(frameCallback)
+      safely {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        Choreographer.getInstance().postFrameCallback(frameCallback)
+      }
     }
     synchronized(lock) {
       if (sampling) return
@@ -121,8 +123,10 @@ object Vitals {
 
   private fun halt() {
     UiThreadUtil.runOnUiThread {
-      Choreographer.getInstance().removeFrameCallback(frameCallback)
-      synchronized(lock) { lastFrameNs = 0L }
+      safely {
+        Choreographer.getInstance().removeFrameCallback(frameCallback)
+        synchronized(lock) { lastFrameNs = 0L }
+      }
     }
     synchronized(lock) {
       sampling = false

@@ -4,6 +4,33 @@ import Network
 import QuartzCore
 import UIKit
 
+// A trap (Int(_:) of NaN, a force unwrap of nil) ends the app, and Swift
+// cannot catch it. test/guard.test.ts fails on as!, try!, a force unwrap
+// and an integer conversion in ios/*.swift. A conversion of a floating
+// value goes through finiteInt64 or finiteInt. A line that needs one of
+// these has a comment "// force: <reason>" or "// trap-free: <reason>" on
+// the line before it.
+
+/// The integer of a floating value. NaN gives 0, and a value out of range
+/// gives the nearest bound: Int64(_:) traps on them.
+func finiteInt64(_ value: Double) -> Int64 {
+  guard value.isFinite else { return 0 }
+  if value >= 9.2e18 { return Int64.max }
+  if value <= -9.2e18 { return Int64.min }
+  // trap-free: finite and in range.
+  return Int64(value)
+}
+
+/// As finiteInt64. On iOS, Int has 64 bits.
+func finiteInt(_ value: Double) -> Int {
+  // trap-free: Int has 64 bits on iOS.
+  Int(finiteInt64(value))
+}
+
+func finiteInt(_ value: CGFloat) -> Int {
+  finiteInt(Double(value))
+}
+
 /// Native half of the SDK on iOS. OodleRum.mm forwards each TurboModule
 /// call here. Structured results go back to JS as JSON strings.
 @objc(OodleRumImpl)
@@ -101,7 +128,7 @@ public final class OodleRumImpl: NSObject {
   }
 
   static func nowMs() -> Int64 {
-    Int64(Date().timeIntervalSince1970 * 1000)
+    finiteInt64(Date().timeIntervalSince1970 * 1000)
   }
 
   /// Keys are sorted, so the same object always gives the same text.
@@ -150,7 +177,7 @@ public final class OodleRumImpl: NSObject {
     let mirror = Mirror(reflecting: system.machine)
     return mirror.children.reduce(into: "") { result, element in
       if let value = element.value as? Int8, value != 0 {
-        result.append(Character(UnicodeScalar(UInt8(value))))
+        result.append(Character(UnicodeScalar(UInt8(bitPattern: value))))
       }
     }
   }
@@ -447,7 +474,7 @@ final class HangWatchdog {
       let semaphore = DispatchSemaphore(value: 0)
       let postedAt = CACurrentMediaTime()
       DispatchQueue.main.async { semaphore.signal() }
-      if semaphore.wait(timeout: .now() + .milliseconds(Int(thresholdMs))) == .timedOut {
+      if semaphore.wait(timeout: .now() + .milliseconds(finiteInt(thresholdMs))) == .timedOut {
         // Still blocked: wait for the end so the event has the full duration.
         semaphore.wait()
         let blockedMs = (CACurrentMediaTime() - postedAt) * 1000
@@ -455,8 +482,8 @@ final class HangWatchdog {
         if active {
           events.add([
             "type": "app_hang",
-            "timestamp": OodleRumImpl.nowMs() - Int64(blockedMs),
-            "duration_ms": Int64(blockedMs),
+            "timestamp": OodleRumImpl.nowMs() - finiteInt64(blockedMs),
+            "duration_ms": finiteInt64(blockedMs),
           ])
         }
       }
@@ -594,6 +621,7 @@ final class VitalsCollector: NSObject {
     var info = task_vm_info_data_t()
     var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size / MemoryLayout<natural_t>.size)
     let result = withUnsafeMutablePointer(to: &info) {
+      // trap-free: a mach_msg_type_number_t (UInt32) fits in Int.
       $0.withMemoryRebound(to: integer_t.self, capacity: Int(count)) {
         task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), $0, &count)
       }
@@ -621,13 +649,13 @@ final class VitalsCollector: NSObject {
     defer { lock.unlock() }
     let now = CACurrentMediaTime()
     let duration = now - intervalStart
-    var out: [String: Any] = ["duration_ms": Int64(duration * 1000)]
+    var out: [String: Any] = ["duration_ms": finiteInt64(duration * 1000)]
     if frames > 0, frameTime > 0 { out["refresh_rate_avg"] = Double(frames) / frameTime }
     if minFps > 0 { out["refresh_rate_min"] = minFps }
     out["slow_frame_count"] = slow
     out["frozen_frame_count"] = frozen
-    if memSamples > 0 { out["memory_avg_bytes"] = Int64(memSum / Double(memSamples)) }
-    if memMax > 0 { out["memory_max_bytes"] = Int64(memMax) }
+    if memSamples > 0 { out["memory_avg_bytes"] = finiteInt64(memSum / Double(memSamples)) }
+    if memMax > 0 { out["memory_max_bytes"] = finiteInt64(Double(memMax)) }
     let cpu = Self.cpuSeconds()
     if cpu >= 0, cpuStart >= 0, duration > 0 {
       out["cpu_ms_per_sec"] = (cpu - cpuStart) * 1000 / duration
