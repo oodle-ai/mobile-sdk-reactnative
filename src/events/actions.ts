@@ -4,7 +4,7 @@ import { getDeviceInfo } from '../core/native';
 import { incrTelemetry } from '../core/telemetry';
 import { isOverPrivateArea } from '../replay/recorder';
 import { attributesJSON, emit } from './emit';
-import { fiberFromEvent, resolveTapTarget } from './tap-target';
+import { fiberFromEvent, masksTapText, resolveTapTarget } from './tap-target';
 import { holdTap } from './held-tap';
 import { isPressTrackingActive } from './press-tracking';
 import { getCurrentViewInfo } from './view-state';
@@ -128,7 +128,7 @@ export function recordTap(startEvent: unknown, start: TouchPoint, end: TouchPoin
     target = resolveTapTarget(fiber, {
       actionNameAttribute: config.actionNameAttribute,
       useAccessibilityLabel: config.useAccessibilityLabel,
-      maskText: config.replay.textAndInputPrivacy === 'mask-all',
+      maskText: masksTapText(config.replay),
     });
   } catch {
     target = null;

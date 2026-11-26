@@ -162,7 +162,9 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
 
 - Tap actions follow the replay privacy rules (`privacyLevelOf` in
   `src/events/tap-target.ts`): under `hidden`, `mask` or `mask-all`, a tap
-  has no text label and, in a private area, no position.
+  has no text label and, in a private area, no position. `mask-all` is the
+  default also with replay off, so it applies only while replay is on
+  (`masksTapText`); otherwise every tap was a bare `Pressable`.
 - rrweb builds an added node without its `childNodes`: a mutation adds
   each child (text, picture) on its own.
 - The picture of a drawing is a child element, so a move does not send it
@@ -184,7 +186,9 @@ diff changes. rrweb-snapshot is pinned to the version the frontend uses.
   `js_crash_marker`, and native code skips a JS fatal within 10 s of it.
   The abort() can come before the marker, so the next start also drops a
   native crash of those types within 10 s of the marker
-  (`reportPendingCrash`). Each JS fatal is reported once.
+  (`reportPendingCrash`). Each JS fatal is reported once. Any signal in
+  that window is dropped too: while React Native removes the JS runtime,
+  the JS thread can crash in Hermes (a SIGSEGV, seen on iOS 0.79.7).
 - The JS handler passes a fatal error on after `FATAL_HANDOFF_DELAY_MS`.
   React Native's handler ends the process, and a crash reporter earlier
   in the chain (the reference SDK) writes its report on native queues.
@@ -238,6 +242,8 @@ and replay, so one build serves every run.
   are checked on a known block: after its steps, the walk sends
   `soak:long-task:<name>` and blocks the JS thread for 400 ms, and Oodle
   must report a long task for it (`forced-long-task`).
+  `forced-long-task-ms` gives the durations that each SDK reported for it
+  (median and range), to show how near they are to 400 ms.
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device, with the settings that each SDK ships with
   (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI

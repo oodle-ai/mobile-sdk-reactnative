@@ -5,19 +5,25 @@ import { isoTime } from '../core/clock';
 
 /**
  * A timer that should fire every TICK_MS. It runs only in the foreground,
- * in a sampled session. When the JS thread is busy the
- * timer fires late, and the delay is the time the thread was blocked.
+ * in a sampled session. When the JS thread is busy the timer fires late.
  * A timer is used rather than a frame callback so an idle app does not
  * wake the JS thread on every frame.
+ *
+ * The block ends when the late tick runs. It starts between the last tick
+ * and one tick after it, and the timer cannot tell where. The time since
+ * the last tick, less half a tick, is wrong by at most half a tick. (The
+ * delay of the tick is less than the block by up to one full tick: the 400 ms
+ * block of the comparison runs gave 350 to 409 ms.)
  */
-const TICK_MS = 50;
+export const TICK_MS = 50;
 
 let timer: ReturnType<typeof setTimeout> | null = null;
-let expected = 0;
+/** When the last tick ran: the JS thread was free then. */
+let lastRun = 0;
 
 function tick() {
   const now = Date.now();
-  const blocked = now - expected;
+  const blocked = now - lastRun - TICK_MS / 2;
   const threshold = getConfig()?.longTaskThresholdMs ?? 0;
   if (threshold > 0 && blocked >= threshold) {
     // A long task is not user activity.
@@ -30,7 +36,7 @@ function tick() {
       false,
     );
   }
-  expected = now + TICK_MS;
+  lastRun = now;
   timer = setTimeout(tick, TICK_MS);
 }
 
@@ -38,7 +44,7 @@ export function startLongTaskTracking() {
   if (timer || !(getConfig()?.longTaskThresholdMs ?? 0)) return;
   // The events of a session that is not sampled are not sent.
   if (!isSessionSampled()) return;
-  expected = Date.now() + TICK_MS;
+  lastRun = Date.now();
   timer = setTimeout(tick, TICK_MS);
 }
 
