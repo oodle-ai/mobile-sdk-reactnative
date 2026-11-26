@@ -16,13 +16,14 @@
 # report is what an app pays.
 #
 # Usage: cost.sh android|ios <collector dir>
-# Environment: REPLAY (on|off, default on), ROUNDS (default 3),
+# Environment: REPLAY (on|off, default on), ROUNDS (default 6: a multiple
+#   of the three providers, so each runs in each place of a round as often),
 #   LAUNCHES per provider and round (default 10, as soak.sh), STEPS (default 12),
 #   PROVIDERS (default "none oodle reference"), SDK_SETTINGS (default shipped).
 set -euo pipefail
 PLATFORM="${1:?android|ios}"
 OUT="${2:?collector dir}"
-ROUNDS="${ROUNDS:-3}"
+ROUNDS="${ROUNDS:-6}"
 PROVIDERS="${PROVIDERS:-none oodle reference}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 export SDK_SETTINGS="${SDK_SETTINGS:-shipped}"

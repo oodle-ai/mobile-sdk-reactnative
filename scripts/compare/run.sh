@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Compares Oodle with the reference SDK on the Fieldwork fixture, on the running
 # Android emulator or a booted iOS simulator:
-#   1. parity: PARITY_LAUNCHES soak launches with both SDKs, which take
-#      turns to start first, then parity.mjs. Its result is the result of
-#      this script.
+#   1. parity: PARITY_LAUNCHES soak launches with both SDKs, with each
+#      start order and each fetch (React Native's, on XHR, and one that
+#      does not run on XHR, as Expo's), then parity.mjs. Its result is the
+#      result of this script.
 #   2. cost: cost.sh (no SDK, Oodle, the reference SDK in turn), then cost.mjs.
 # Each part has its own mock collector and output folder, so the data of
 # one does not mix with the other. The fixture must be built with this
@@ -65,7 +66,7 @@ kill_app
 status=0
 if [ "${SKIP_PARITY:-0}" != 1 ]; then
   start_collector "$OUT/parity"
-  PROVIDER=both ORDER=alternate LAUNCHES="$PARITY_LAUNCHES" bash "$HERE/soak.sh" "$PLATFORM" "$OUT/parity"
+  PROVIDER=both ORDER=alternate FETCH=alternate LAUNCHES="$PARITY_LAUNCHES" bash "$HERE/soak.sh" "$PLATFORM" "$OUT/parity"
   stop_collector
   node "$HERE/parity.mjs" --out "$OUT/parity" --platform "$PLATFORM" --replay "$REPLAY" || status=1
 fi

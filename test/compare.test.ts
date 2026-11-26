@@ -241,11 +241,11 @@ type Step = { kind: 'action' | 'error' | 'request'; name: string };
  * that it reported for the forced block (0: none), and `openViewMs` the
  * time of a last view that is still open (undefined: no such view).
  */
-type LaunchEnd = { longTaskMs?: number; openViewMs?: number };
+type LaunchEnd = { longTaskMs?: number; openViewMs?: number; taps?: string[] };
 
 /** One launch of a soak walk, as each SDK reports it. */
 function oodleLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
-  const { longTaskMs = 380, openViewMs } = end;
+  const { longTaskMs = 380, openViewMs, taps = [] } = end;
   let n = 0;
   const base = (viewId = `${session}-v`) => ({ log_record_uid: `${session}-${n++}`, session_id: session, view_id: viewId, app_screen_name: 'Home', timestamp: new Date(t0 + n * 100).toISOString() });
   const view = (seq: number, active: boolean) => ({ ...base(), event_type: 'view', view_update_seq: seq, view_is_new: seq === 1 ? 1 : 0, view_is_active: active ? 1 : 0, view_time_spent_ms: seq * 2000 });
@@ -255,6 +255,8 @@ function oodleLaunch(launch: string, session: string, steps: Step[], t0: number,
     if (s.kind === 'error') events.push({ ...base(), event_type: 'error', error_source: 'custom', error_is_crash: 0, exception_message: s.name });
     if (s.kind === 'request') events.push({ ...base(), event_type: 'resource', url_full: `${API}/${s.name}` });
   }
+  // Oodle names a tap after the element and its label.
+  for (const t of taps) events.push({ ...base(), event_type: 'action', action_type: 'tap', action_name: `Pressable ("${t}")` });
   events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:long-task:${launch}` });
   if (longTaskMs) events.push({ ...base(), event_type: 'long_task', long_task_duration_ms: longTaskMs });
   events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:done:${launch}` }, view(2, false));
@@ -265,7 +267,7 @@ function oodleLaunch(launch: string, session: string, steps: Step[], t0: number,
 }
 
 function referenceLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
-  const { longTaskMs = 400, openViewMs } = end;
+  const { longTaskMs = 400, openViewMs, taps = [] } = end;
   let n = 0;
   const base = () => ({ date: t0 + ++n * 100, session: { id: session }, view: { id: `${session}-v`, name: 'Home' } });
   const view = (version: number, active: boolean) => ({ ...base(), type: 'view', _dd: { document_version: version }, view: { id: `${session}-v`, name: 'Home', is_active: active, time_spent: version * 2e9 } });
@@ -276,6 +278,7 @@ function referenceLaunch(launch: string, session: string, steps: Step[], t0: num
     if (s.kind === 'error') events.push({ ...base(), type: 'error', error: { id: `${session}-e${n}`, source: 'custom', is_crash: false, message: s.name } });
     if (s.kind === 'request') events.push({ ...base(), type: 'resource', resource: { id: `${session}-r${n}`, url: `${API}/${s.name}?seed=1` } });
   }
+  for (const t of taps) events.push({ ...base(), type: 'action', action: { id: `${session}-t${n}`, type: 'tap', target: { name: t } } });
   events.push(action(`soak:long-task:${launch}`));
   // The reference SDK sends durations in nanoseconds.
   if (longTaskMs) events.push({ ...base(), type: 'long_task', long_task: { id: `${session}-l${n}`, duration: longTaskMs * 1e6 } });
@@ -643,5 +646,45 @@ describe('comparison scripts', () => {
     const md = fs.readFileSync(path.join(out, 'parity.md'), 'utf8');
     expect(md).toContain('(android, replay off, 2 launches: oodle-first, reference-first)');
     expect(md).toMatch(/\| custom-actions \| must \| \*\*FAIL\*\* \| 1 of 2 \(reference-first\) \| soak-both-off-r1-2 \(reference-first\): /);
+  });
+  // CI taps the app with a real touch and records its taps (soak.sh TAPS),
+  // as the stand-in API records the requests.
+  async function tapRun(oodleTaps: string[], referenceTaps: string[], ciTaps = ['Orders', 'Home'], missed: string[] = []) {
+    const out = tmp();
+    const c = await startCollector(out);
+    const launch = 'soak-both-off-r1-1';
+    const t0 = Date.now() - 5000;
+    await c.scenario({ name: launch, provider: 'both' });
+    await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, { taps: oodleTaps }));
+    await c.reference(referenceLaunch(launch, 'ref-1', STEPS, t0, { taps: referenceTaps }));
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900, { name: launch, order: 'oodle-first', fetch: 'native', taps: ciTaps, taps_missed: missed }) + '\n');
+    return out;
+  }
+
+  it('passes when Oodle reports each tap that CI made, with its label', async () => {
+    const out = await tapRun(['Home', 'Orders'], ['Orders', 'Home']);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/ok {3}taps: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/ok {3}taps \(reference\): differs in 0 of 1/);
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(out, 'parity.md'), 'utf8')).toContain('1 launches: oodle-first + native fetch; 2 taps by CI)');
+  });
+
+  it('fails when Oodle lost a tap, and reports a tap that the reference SDK lost', async () => {
+    const out = await tapRun(['Orders'], []);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/FAIL taps: differs in 1 of 1 \(soak-both-off-r1-1 \(oodle-first \+ native fetch\): Oodle `Orders` \/ CI taps `Home, Orders`\)/);
+    expect(r.stdout).toMatch(/diff taps \(reference\): differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  // Without a working tap tool CI makes no taps. That must fail, not pass
+  // as a run with nothing to check.
+  it('fails when CI could not make a tap', async () => {
+    const out = await tapRun(['Home'], ['Home'], ['Home'], ['Orders']);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/ok {3}taps: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/FAIL taps-made: differs in 1 of 1 \(all: taps that CI made `1 of 2` \/ not made `Orders`\)/);
+    expect(r.status).toBe(1);
   });
 });

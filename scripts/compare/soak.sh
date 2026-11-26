@@ -31,6 +31,16 @@
 #             even ones: an app can start either one first, and the SDK
 #             that starts second wraps the fetch, XHR and error handlers of
 #             the first.
+#   FETCH     xhr|native|alternate: the global fetch of the app (default
+#             xhr, React Native's own). native does not run on XHR, as
+#             Expo's (fixtures/fieldwork/src/native-fetch.ts). alternate
+#             takes xhr on launches 1 and 2, native on 3 and 4, and so on:
+#             with ORDER=alternate, each four launches have each order
+#             with each fetch.
+#   TAPS      on|off: CI taps two tabs in each launch, 8 s and 12 s after
+#             the start, with a real touch (tap_label in
+#             scripts/ci/device.sh), and records the taps that it made
+#             (default on)
 #   SDK_SETTINGS  ci|shipped: the upload and log settings of both SDKs
 #             (fixtures/fieldwork/src/config.ts, default ci)
 #   REFERENCE_DEBUG  1 starts the reference SDK with its debug log, in the device log
@@ -44,6 +54,10 @@ SEED="${SEED:-1}"
 STEPS="${STEPS:-12}"
 ROUND="${ROUND:-1}"
 ORDER="${ORDER:-oodle-first}"
+FETCH="${FETCH:-xhr}"
+TAPS="${TAPS:-on}"
+# The positions of the elements to tap, found once for the run.
+export TAP_POSITIONS="${TAP_POSITIONS:-$OUT/tap-positions.tsv}"
 SDK_SETTINGS="${SDK_SETTINGS:-ci}"
 COLLECTOR=http://localhost:4318
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -59,11 +73,11 @@ DEBUG_JSON=$([ "${REFERENCE_DEBUG:-0}" = 1 ] && echo true || echo false)
 LAUNCHES_FILE="$OUT/launches.ndjson"
 ENDS=(background return kill)
 
-# set_scenario <name> <seed> [order]
+# set_scenario <name> <seed> [order] [fetch]
 set_scenario() {
   curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$(printf \
-    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s,"settings":"%s","order":"%s"}' \
-    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON" "$SDK_SETTINGS" "${3:-oodle-first}")" > /dev/null
+    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s,"settings":"%s","order":"%s","fetch":"%s"}' \
+    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON" "$SDK_SETTINGS" "${3:-oodle-first}" "${4:-xhr}")" > /dev/null
 }
 
 # The order of the SDKs in launch <n>.
@@ -73,6 +87,24 @@ order_of() {
     *) echo "$ORDER" ;;
   esac
 }
+
+# The global fetch of the app in launch <n>.
+fetch_of() {
+  case "$FETCH" in
+    alternate) [ $((($1 - 1) / 2 % 2)) -eq 0 ] && echo xhr || echo native ;;
+    *) echo "$FETCH" ;;
+  esac
+}
+
+# Sleeps until second <s> of the shell's clock ($SECONDS), so a slow tap
+# does not make the launch longer.
+sleep_until() {
+  local d=$(($1 - SECONDS))
+  if [ "$d" -gt 0 ]; then sleep "$d"; fi
+}
+
+# The tabs that CI taps: one of these, then Home.
+TAP_TABS=(Orders Comms More)
 
 # The number of walks of this run that ended and reached the collector,
 # for each SDK that the provider runs. The lowest of them.
@@ -97,14 +129,30 @@ for i in $(seq 1 "$LAUNCHES"); do
   name="soak-$PREFIX-$i"
   end=${ENDS[$(((i - 1) % ${#ENDS[@]}))]}
   order=$(order_of "$i")
+  fetch=$(fetch_of "$i")
   # The app ends before the scenario is set, so the collector's time of the
   # set is the start of the launch (the start time in cost.mjs).
   kill_app
-  set_scenario "$name" $((SEED + i)) "$order"
+  set_scenario "$name" $((SEED + i)) "$order" "$fetch"
   start_app
+  started=$SECONDS
   frames_reset
   pid=$(app_pid)
-  sleep "$LAUNCH_SECONDS"
+  # The taps that reached an element, as a JSON list: what the app was
+  # given, to check what each SDK reported.
+  # A tap that the tool could not make is recorded too: parity.mjs fails
+  # on it, so a broken tap tool does not pass as a run without taps.
+  taps=
+  missed=
+  if [ "$TAPS" = on ]; then
+    offset=8
+    for label in "${TAP_TABS[$((i % ${#TAP_TABS[@]}))]}" Home; do
+      sleep_until $((started + offset))
+      if tap_label "$label"; then taps="$taps\"$label\","; else missed="$missed\"$label\","; fi
+      offset=$((offset + 4))
+    done
+  fi
+  sleep_until $((started + LAUNCH_SECONDS))
   # A killed app is measured before the kill. The other ends are measured
   # after the background, so the work that the SDKs do on the way to the
   # background counts.
@@ -129,10 +177,10 @@ for i in $(seq 1 "$LAUNCHES"); do
       frames=$(frames_json)
       ;;
   esac
-  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","order":"%s","round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
-    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$order" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
+  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","order":"%s","fetch":"%s","taps":[%s],"taps_missed":[%s],"round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
+    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$order" "$fetch" "${taps%,}" "${missed%,}" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
     "${START_MS:-null}" "${cpu:-null}" "${threads:-null}" "${mem:-null}" "${frames:-null}" >> "$LAUNCHES_FILE"
-  echo "$name: $order, end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
+  echo "$name: $order, fetch $fetch, taps [${taps%,}]${missed:+, not made [${missed%,}]}, end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
 done
 
 # One more start sends what the SDKs saved: the last launch, or one whose

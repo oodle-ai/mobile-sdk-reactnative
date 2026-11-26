@@ -207,7 +207,7 @@ for (const r of rows) {
 lines.push(
   '',
   platform === 'ios'
-    ? 'The simulator runs on the host CPU and GPU: compare the SDKs with each other, not with a phone. It gives no frames, and ps shows no name for the JS thread.'
+    ? 'The simulator runs on the host CPU and GPU: compare the SDKs with each other, not with a phone. It gives no frames. The JS thread is the thread that React Native names com.facebook.react.JavaScript (thread-cpu.py).'
     : 'The CI emulator renders in software: janky frames and first frame are rough. Measure them on a real device before quoting them.',
 );
 if (!rows.length) lines.push('', 'No launches found.');

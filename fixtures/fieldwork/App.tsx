@@ -7,6 +7,7 @@ import { Comms } from './src/screens/Comms';
 import { Home } from './src/screens/Home';
 import { More } from './src/screens/More';
 import { Orders } from './src/screens/Orders';
+import { installNativeFetch } from './src/native-fetch';
 import { fetchScenario, NO_SCENARIO, reportReady, runScenario, type Scenario } from './src/scenario';
 import { setSdkSettings, type TelemetryProvider as Provider } from './src/config';
 import { currentProvider, setReferenceFirst, setProvider, telemetry } from './src/telemetry';
@@ -35,6 +36,9 @@ export default function App() {
         setReferenceFirst(s.order === 'reference-first');
         setReferenceDebug(s.debug === true);
         setSdkSettings(s.settings);
+        // Before the SDKs start, as Expo puts its fetch in place before
+        // the app's code runs: the SDKs wrap the fetch that they find.
+        if (s.fetch === 'native') installNativeFetch();
         if (s.provider) setProvider(s.provider);
         setProviderState(currentProvider());
         return telemetry.initialize(true, s.replay);

@@ -75,10 +75,20 @@ const replayBySession = Object.fromEntries(SDKS.map((sdk) => [sdk, groupBy(repla
 // launches are the soak scenario actions that either SDK sent.
 const bothLaunches = readLaunches(out).filter((l) => l.provider === 'both');
 const launches = bothLaunches.map((l) => l.name);
-// Which SDK started first in each launch (soak.sh ORDER). A difference in
-// the launches of one order only points at the SDK that starts second:
-// it wraps the fetch, XHR and error handlers of the first.
-const orderOf = new Map(bothLaunches.filter((l) => l.order).map((l) => [l.name, l.order]));
+// How each launch ran: which SDK started first (soak.sh ORDER) and the
+// app's fetch (FETCH: React Native's on XHR, or native, as Expo's). A
+// difference in the launches of one kind only points at its path: the SDK
+// that starts second wraps the fetch, XHR and error handlers of the first,
+// and a native fetch is seen by the fetch wrappers only.
+const variantOf = new Map(
+  bothLaunches.filter((l) => l.order || l.fetch).map((l) => [l.name, [l.order, l.fetch && `${l.fetch} fetch`].filter(Boolean).join(' + ')]),
+);
+// The taps that CI made in each launch (soak.sh TAPS): what the app was
+// given, as the stand-in API is for requests.
+const tapsOf = new Map(bothLaunches.filter((l) => Array.isArray(l.taps)).map((l) => [l.name, l.taps]));
+const tapsMissed = bothLaunches.flatMap((l) => l.taps_missed ?? []);
+/** The label of an Oodle tap: its name is `Pressable ("Orders")`. */
+const tapLabel = (name) => /\("(.*)"\)$/.exec(String(name))?.[1] ?? String(name);
 if (!launches.length) {
   const names = new Set();
   for (const sdk of SDKS) {
@@ -187,6 +197,17 @@ for (const launch of launches) {
   } else {
     compare('api-requests', 'must', launch, oodleApi, referenceApi);
   }
+  if (tapsOf.has(launch)) {
+    // Each tap reached the app through its touch handling, so Oodle must
+    // report each, with the label of the element. The reference SDK is
+    // reported against the same taps, and does not fail the run.
+    const truth = tally(tapsOf.get(launch));
+    const [oodleTaps, referenceTaps] = per((ev, sdk) =>
+      tally(ev.filter((e) => e.type === 'action' && e.action_type === 'tap').map((e) => (sdk === 'oodle' ? tapLabel(e.name) : String(e.name)))),
+    );
+    compare('taps', 'must', launch, oodleTaps, truth, oodleTaps === truth, ['Oodle', 'CI taps']);
+    compare('taps (reference)', 'info', launch, referenceTaps, truth, referenceTaps === truth, ['reference', 'CI taps']);
+  }
   check('screens', 'must', (ev) => [...new Set(lastViewUpdates(ev).map((v) => v.screen))].sort().join(', '));
   check('views', 'info', (ev) => lastViewUpdates(ev).length);
   check('views-closed', 'info', (ev) => lastViewUpdates(ev).filter((v) => v.active === false).length);
@@ -245,6 +266,15 @@ for (const launch of launches) {
   compare('replay (reference)', 'must', launch, has(referenceReplay), expected, has(referenceReplay) === expected, ['reference', 'expected']);
 }
 
+// A tap that CI could not make (no tap tool, or no element with the
+// label): the run then checks fewer taps than it should.
+if (tapsOf.size) {
+  const made = [...tapsOf.values()].reduce((n, t) => n + t.length, 0);
+  compare('taps-made', 'must', 'all', `${made} of ${made + tapsMissed.length}`, tally(tapsMissed) || '–', tapsMissed.length === 0, [
+    'taps that CI made',
+    'not made',
+  ]);
+}
 // Over the whole run: an event that arrives twice counts twice.
 const dupes = Object.fromEntries(SDKS.map((sdk) => [sdk, events[sdk].length - new Set(events[sdk].map((e) => e.id)).size]));
 compare('no-duplicates', 'must', 'all', dupes.oodle, dupes.reference, dupes.oodle === 0 && dupes.reference === 0);
@@ -297,9 +327,11 @@ if (replay === 'on') compare('replay-kb (decoded)', 'info', 'all', replayKb('ood
 // The report.
 const summary = [];
 let failed = 0;
-const orders = tally([...orderOf.values()]);
+const variants = tally([...variantOf.values()]);
+const tapCount = [...tapsOf.values()].reduce((n, t) => n + t.length, 0);
+const runInfo = [variants, tapsOf.size ? `${tapCount} taps by CI` : ''].filter(Boolean).join('; ');
 const lines = [
-  `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches${orders ? `: ${orders}` : ''})`,
+  `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches${runInfo ? `: ${runInfo}` : ''})`,
   '',
   '| Check | Level | Result | Differs in | Example (Oodle / reference, unless named) |',
   '|---|---|---|---|---|',
@@ -312,14 +344,14 @@ for (const [name, { level, labels, rows }] of results) {
   const result = differ.length === 0 ? 'same' : reason ? `allowed: ${reason}` : fails ? '**FAIL**' : 'differs';
   // The first difference, or for a measure, its values.
   const ex = differ[0] ?? (level === 'info' && rows.length === 1 ? rows[0] : undefined);
-  const where = ex && orderOf.has(ex.launch) ? `${ex.launch} (${orderOf.get(ex.launch)})` : ex?.launch;
+  const where = ex && variantOf.has(ex.launch) ? `${ex.launch} (${variantOf.get(ex.launch)})` : ex?.launch;
   const example = !ex
     ? ''
     : labels
       ? `${where}: ${labels[0]} \`${ex.oodle}\` / ${labels[1]} \`${ex.reference}\``
       : `${where}: \`${ex.oodle}\` / \`${ex.reference}\``;
-  // The launches that differ, by order, when the launches had more than one.
-  const byOrder = new Set(orderOf.values()).size > 1 && differ.length ? ` (${tally(differ.map((r) => orderOf.get(r.launch) ?? 'unknown'))})` : '';
+  // The launches that differ, by kind, when the launches had more than one.
+  const byOrder = new Set(variantOf.values()).size > 1 && differ.length ? ` (${tally(differ.map((r) => variantOf.get(r.launch) ?? 'unknown'))})` : '';
   lines.push(`| ${name} | ${level} | ${result} | ${differ.length} of ${rows.length}${byOrder} | ${example.replace(/\|/g, '\\|')} |`);
   summary.push({ check: name, level, differ: differ.length, of: rows.length, result, examples: differ.slice(0, 5) });
   console.log(`${fails ? 'FAIL' : differ.length ? 'diff' : 'ok  '} ${name}: differs in ${differ.length} of ${rows.length}${ex ? ` (${example})` : ''}`);
