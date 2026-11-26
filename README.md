@@ -207,7 +207,9 @@ it. The Oodle replay player plays them as it plays browser sessions.
   is named only by its `oodle-action-name` prop, or else by its component
   (`Pressable`): no text or accessibility label of the button is sent.
   The tap position is not sent there, nor anywhere with
-  `touchPrivacy: 'hide'`.
+  `touchPrivacy: 'hide'`. With `sessionReplay: false`, `'mask-all'` does
+  not apply to taps (nothing is recorded); `hidden` and `mask` subtrees
+  still do.
 
 ## How it works
 
