@@ -145,13 +145,18 @@ const LAST_CONTEXT_KEY = 'last_context';
  * Saves who and where the app is, so a native crash reported on the next
  * start can be attached to the session and screen it happened on.
  */
-export function saveLastContext() {
+export function saveLastContext(opts: { sync?: boolean } = {}) {
   // Saving the context is not activity: it must not start a session. On
   // a first launch there is none until the first activity.
   const session = peekSession();
   const view = getCurrentViewInfo();
   const user = getUser();
-  storage.setJSON(LAST_CONTEXT_KEY, {
+  // A new screen or user writes on a native background thread, so the
+  // write does not block the JS thread. A native crash in the few ms
+  // before that write runs is reported on the screen before. The fatal
+  // error handler and the way to the background write synchronously:
+  // there the process can end at once.
+  (opts.sync ? storage.setJSON : storage.setJSONAsync)(LAST_CONTEXT_KEY, {
     session_id: session?.id ?? '',
     sampled: session?.sampled ?? true,
     app_screen_name: view?.name ?? '',

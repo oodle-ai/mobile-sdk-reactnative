@@ -138,7 +138,7 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
       // The marker only after the crash is recorded: it makes the next
       // start drop the native copy of this crash.
       storage.set(JS_CRASH_MARKER_KEY, String(Date.now()));
-      saveLastContext();
+      saveLastContext({ sync: true });
       persistOutbox({ sync: true });
       // The crash is on disk, and the next start sends it. A flush in
       // the handoff could send it too, and it would count two times.
