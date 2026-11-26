@@ -134,7 +134,7 @@ function handleGlobalError(error: unknown, isFatal?: boolean) {
     if (record) addError(error, undefined, 'source', Boolean(isFatal));
     if (isFatal && record) {
       storage.set(JS_CRASH_MARKER_KEY, String(Date.now()));
-      saveLastContext();
+      saveLastContext({ sync: true });
       persistOutbox({ sync: true });
       // The crash is on disk, and the next start sends it. A flush in
       // the handoff could send it too, and it would count two times.

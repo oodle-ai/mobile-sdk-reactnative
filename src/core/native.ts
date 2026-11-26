@@ -171,6 +171,16 @@ export const storage = {
       return false;
     }
   },
+  /** setJSON on a native background thread (setAsync). */
+  setJSONAsync(key: string, value: unknown): void {
+    let raw: string;
+    try {
+      raw = JSON.stringify(value);
+    } catch {
+      return;
+    }
+    storage.setAsync(key, raw);
+  },
 };
 
 export interface NativePostResult {

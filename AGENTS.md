@@ -88,6 +88,12 @@ keeps these rules (`src/core/transport.ts`):
   on a fatal error. A backgrounded app can get so little CPU that a write
   on a native background queue does not run before iOS ends it (seen on
   the CI runners); the events sent on the way out were then lost.
+  The session and the saved context (`last_context`) are written
+  synchronously there and on a fatal error, and on a native background
+  thread at all other times (`storage.setJSONAsync`): a synchronous write
+  blocks the JS thread. On iOS only the outbox is written with fsync
+  (`durableKeys`); other files use a temporary file and a rename, as on
+  Android.
 - The retry queue is oldest first. While a body waits (a backoff after a
   failure), a new body waits behind it: sent at once, it fails too while
   offline, and replay segments must arrive in order. At the size limits
