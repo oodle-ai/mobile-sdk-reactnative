@@ -23,7 +23,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, opt, outDir } from '../ci/collector-lib.mjs';
-import { groupBy, lastViewUpdates, readApiRequests, readEvents, readLaunches, readReplay, tally, writeReport } from './lib.mjs';
+import { groupBy, lastViewUpdates, median, readApiRequests, readEvents, readLaunches, readReplay, tally, writeReport } from './lib.mjs';
 
 const out = outDir();
 const platform = opt('platform', 'android');
@@ -47,6 +47,9 @@ const FORCED_MIN_MS = 300;
 // a long task the time of its start or of its end, and the block lasts
 // 400 ms.
 const FORCED_WINDOW_MS = 2000;
+// The durations that each SDK gave the forced block, for the
+// forced-long-task-ms measure.
+const forcedMs = { oodle: [], reference: [] };
 
 const events = readEvents(out);
 const replaySegments = readReplay(out);
@@ -143,12 +146,13 @@ for (const launch of launches) {
   // must report a long task for it. Other long tasks do not tell which SDK
   // is right: the reference SDK also reports the JS thread paused in the
   // background on iOS, and blocks near the threshold give either result.
-  const [oodleForced, referenceForced] = per((ev) => {
+  const [oodleForced, referenceForced] = per((ev, sdk) => {
     const mark = ev.find((e) => e.type === 'action' && e.name === `soak:long-task:${launch}`);
     if (!mark) return 'no mark';
-    const hit = ev.some(
+    const hit = ev.find(
       (e) => e.type === 'long_task' && (e.duration_ms ?? 0) >= FORCED_MIN_MS && Math.abs(e.ts - mark.ts) <= FORCED_WINDOW_MS,
     );
+    if (hit) forcedMs[sdk].push(hit.duration_ms);
     return hit ? 'reported' : 'none';
   });
   compare('forced-long-task', 'must', launch, oodleForced, 'reported', oodleForced === 'reported', ['Oodle', 'expected']);
@@ -193,7 +197,16 @@ for (const launch of launches) {
 // Over the whole run: an event that arrives twice counts twice.
 const dupes = Object.fromEntries(SDKS.map((sdk) => [sdk, events[sdk].length - new Set(events[sdk].map((e) => e.id)).size]));
 compare('no-duplicates', 'must', 'all', dupes.oodle, dupes.reference, dupes.oodle === 0 && dupes.reference === 0);
-compare('sessions', 'info', 'all', bySession.oodle.size, bySession.reference.size);
+// The reference SDK opens a session at launch for its `ApplicationLaunch`
+// view. The sign-in of the fixture stops that session, so each launch
+// gives it one more session, with only that view (and its vitals). Oodle
+// starts no session before the first activity, so a stop before it ends
+// nothing. An app that does not stop the session gets one session per
+// launch from each SDK, so these sessions are not counted.
+const LAUNCH_VIEW = 'ApplicationLaunch';
+const launchOnly = (ev) => ev.every((e) => e.type === 'vital' || (e.type === 'view' && e.screen === LAUNCH_VIEW));
+const sessionCount = (sdk) => [...bySession[sdk].values()].filter((ev) => !launchOnly(ev)).length;
+compare('sessions', 'info', 'all', sessionCount('oodle'), sessionCount('reference'));
 // Two SDKs that each add a traceparent give a request two of them, which a
 // backend can reject or read as the wrong trace. Each request must carry
 // at most one.
@@ -207,6 +220,11 @@ if (haveApiLog) {
     'first',
   ]);
 }
+// The durations of the forced block (400 ms) are a measure, not a check:
+// the median, then the lowest and highest, in ms. They show how near each
+// SDK's long tasks are to the true block.
+const spread = (ms) => (ms.length ? `${Math.round(median(ms))} (${Math.round(Math.min(...ms))}…${Math.round(Math.max(...ms))})` : 'none');
+compare('forced-long-task-ms', 'info', 'all', spread(forcedMs.oodle), spread(forcedMs.reference), true);
 // Replay size is a measure, not a check: cost.mjs compares bytes on the wire.
 const replayKb = (sdk) => Math.round(replaySegments[sdk].reduce((n, s) => n + s.bytes, 0) / 1024);
 if (replay === 'on') compare('replay-kb (decoded)', 'info', 'all', replayKb('oodle'), replayKb('reference'), true);
