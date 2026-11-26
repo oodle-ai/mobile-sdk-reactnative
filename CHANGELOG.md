@@ -33,6 +33,9 @@
   (the first one as a warning) and the SDK goes on. The app's own
   functions run outside the guard, so their results and errors are as
   before.
+- The SDK telemetry has `sdk_internal_errors`: the number of exceptions
+  that the guard caught. The app does not crash on them, so this counter
+  is how a bug in the SDK shows.
 - Fixed: a native module that gives JSON of an unexpected form (`null`,
   a number) made the 5 s ANR timer throw, which ends a release app.
 - Fixed: `setUser`, `setTags`, `addFeatureFlag` and `trackNavigation`

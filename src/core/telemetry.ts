@@ -12,6 +12,9 @@ const COUNTER_NAMES = [
   // A tap with no React fiber on its event: React internals changed, and
   // taps are not named until the SDK is updated.
   'tap_fiber_missing',
+  // Exceptions that the guard caught (core/guard.ts). The app goes on,
+  // so this is the only sign of a bug in the SDK.
+  'sdk_internal_errors',
 ] as const;
 
 export type TelemetryCounter = (typeof COUNTER_NAMES)[number];
