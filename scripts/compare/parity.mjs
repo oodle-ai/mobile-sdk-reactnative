@@ -199,11 +199,13 @@ for (const launch of launches) {
   }
   if (tapsOf.has(launch)) {
     // Each tap reached the app through its touch handling, so Oodle must
-    // report each, with the label of the element. The reference SDK is
-    // reported against the same taps, and does not fail the run.
+    // report each, with the label of the element. The reference SDK (with
+    // its Babel plugin, scripts/ci/create-fixture.sh) is reported against
+    // the same taps, and does not fail the run. Both name a tap
+    // Pressable ("<label>").
     const truth = tally(tapsOf.get(launch));
     const [oodleTaps, referenceTaps] = per((ev, sdk) =>
-      tally(ev.filter((e) => e.type === 'action' && e.action_type === 'tap').map((e) => (sdk === 'oodle' ? tapLabel(e.name) : String(e.name)))),
+      tally(ev.filter((e) => e.type === 'action' && e.action_type === 'tap').map((e) => tapLabel(e.name))),
     );
     compare('taps', 'must', launch, oodleTaps, truth, oodleTaps === truth, ['Oodle', 'CI taps']);
     compare('taps (reference)', 'info', launch, referenceTaps, truth, referenceTaps === truth, ['reference', 'CI taps']);

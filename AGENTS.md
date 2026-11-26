@@ -253,9 +253,11 @@ and replay, so one build serves every run.
   CI taps two tabs in each launch with a real touch (`tap_label` in
   `scripts/ci/device.sh`: `adb shell input tap` on Android, AXe on iOS,
   where simctl has no tap) and records the taps, so `taps` checks
-  Oodle's taps and their labels against them. The reference SDK reports
-  no taps in the fixture (`taps (reference)`, info). A tap that CI could
-  not make fails the run (`taps-made`).
+  Oodle's taps and their labels against them. The reference SDK finds
+  taps through its Babel plugin, which `create-fixture.sh` adds to the
+  fixture (without it, it reported none); `taps (reference)` gives its
+  taps against the same ones (info). A tap that CI could not make fails
+  the run (`taps-made`).
   Each request that reaches the stand-in API with a sampled `traceparent`
   must have its trace on Oodle's resource (`traced-requests`) and an Oodle
   client span with its ids on the session of the launch (`client-spans`).

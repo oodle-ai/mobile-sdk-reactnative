@@ -279,7 +279,7 @@ function referenceLaunch(launch: string, session: string, steps: Step[], t0: num
     if (s.kind === 'error') events.push({ ...base(), type: 'error', error: { id: `${session}-e${n}`, source: 'custom', is_crash: false, message: s.name } });
     if (s.kind === 'request') events.push({ ...base(), type: 'resource', resource: { id: `${session}-r${n}`, url: `${API}/${s.name}?seed=1` } });
   }
-  for (const t of taps) events.push({ ...base(), type: 'action', action: { id: `${session}-t${n}`, type: 'tap', target: { name: t } } });
+  for (const t of taps) events.push({ ...base(), type: 'action', action: { id: `${session}-t${n}`, type: 'tap', target: { name: `Pressable ("${t}")` } } });
   events.push(action(`soak:long-task:${launch}`));
   // The reference SDK sends durations in nanoseconds.
   if (longTaskMs) events.push({ ...base(), type: 'long_task', long_task: { id: `${session}-l${n}`, duration: longTaskMs * 1e6 } });
