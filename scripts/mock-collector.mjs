@@ -79,6 +79,21 @@ const appendLines = (file, rows) => {
 /** Milliseconds from each event to now: how late the SDK delivered it. */
 const lags = (times, now) => times.filter((t) => Number.isFinite(t)).map((t) => Math.max(0, Math.round(now - t)));
 
+/**
+ * The time of a reference SDK event, for its lag. The `date` of a view
+ * update is the start of the view, not the time of the update, so the
+ * update is at `date` + `time_spent` (in ns). With `date` only, the lag of
+ * a view update included the time on the screen: an iOS run gave a p95
+ * lag of 21 s, against 14 s from the times of the updates. An Oodle view
+ * update has the time of the update in `timestamp`.
+ */
+function referenceEventTime(e) {
+  const date = Number(e.date);
+  const spent = e.view?.time_spent;
+  if ((e.type === 'view' || e.type === 'view_update') && typeof spent === 'number') return date + spent / 1e6;
+  return date;
+}
+
 /** One line in requests.ndjson for each upload. */
 function logRequest(row) {
   appendLines(requestsFile, [{ received_ms: Date.now(), scenario: scenario.name, ...row }]);
@@ -143,7 +158,7 @@ async function handleReference(req, res) {
       raw_bytes: raw.length,
       decoded_bytes: body.length,
       events: events.length,
-      lags_ms: lags(events.map((e) => Number(e.date)), now),
+      lags_ms: lags(events.map(referenceEventTime), now),
     });
     console.log(
       `${new Date().toISOString()} reference ${req.url.split('?')[0]} ${events.length} events${bad ? `, ${bad} bad lines` : ''} (${scenario.name})`,

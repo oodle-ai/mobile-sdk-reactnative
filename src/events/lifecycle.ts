@@ -60,7 +60,7 @@ function toBackground() {
   guard(() => emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'background' }, false));
   guard(pauseViews);
   guard(() => hooks.onBackground?.());
-  guard(saveLastContext);
+  guard(() => saveLastContext({ sync: true }));
   guard(flushSession);
   guard(flush);
   // The OS can end a background app without warning, and a backgrounded

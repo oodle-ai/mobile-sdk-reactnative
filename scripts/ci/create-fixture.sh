@@ -29,7 +29,22 @@ npx --yes @react-native-community/cli@latest init OodleExample \
 cd OodleExample
 npm install --no-audit --no-fund "$TARBALL" \
   "@datadog/mobile-react-native@$REFERENCE_SDK_VERSION" \
-  "@datadog/mobile-react-native-session-replay@$REFERENCE_SDK_VERSION"
+  "@datadog/mobile-react-native-session-replay@$REFERENCE_SDK_VERSION" \
+  "@datadog/mobile-react-native-babel-plugin@$REFERENCE_SDK_VERSION"
+
+# The reference SDK finds taps through its Babel plugin. Its tracking
+# without the plugin is deprecated since its v3.0.0 and recorded no tap in
+# the fixture, so the comparison set it up as that SDK tells its users to.
+# The plugin wraps the press handlers of Pressable and the Touchables at
+# build time, in every launch; with the reference SDK off, a wrapper only
+# calls the handler. It names a tap as Oodle does: Pressable ("Orders").
+cat > babel.config.js <<'JS'
+// Written by scripts/ci/create-fixture.sh.
+module.exports = {
+  presets: ['module:@react-native/babel-preset'],
+  plugins: ['@datadog/mobile-react-native-babel-plugin'],
+};
+JS
 
 cp "$REPO/fixtures/fieldwork/App.tsx" App.tsx
 rm -rf src

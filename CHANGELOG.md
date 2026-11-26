@@ -54,6 +54,18 @@
 - iOS: fixed traps in Swift: a view with a NaN size (the picture key), a
   NaN color component, and a negative byte in the device model name.
 
+### Performance
+
+- Less file work on the JS thread. The session and the saved context
+  (the screen and user for a native crash) are written on a native
+  background thread. Only the fatal error handler and the way to the
+  background write them synchronously, as the outbox. On iOS, these files
+  are written without fsync, as on Android: a write still goes through a
+  temporary file and a rename, so a process that ends during a write
+  leaves the last value. The outbox, the only copy of unsent events, is
+  still written with fsync. In the iOS comparison runs, the synchronous
+  write was the only native code of the SDK on the JS thread.
+
 ## 0.1.6
 
 ### Uploads

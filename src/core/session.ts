@@ -40,12 +40,22 @@ function roll(rate: number): boolean {
   return Math.random() * 100 < rate;
 }
 
-function write() {
+/**
+ * Writes the session on a native background thread, so the file write
+ * does not block the JS thread. Only the way to the background writes it
+ * synchronously (`flushSession`): there the app can be ended at once. A
+ * write that has not run when the process ends loses only the last
+ * changes: the next launch starts a session of its own, and the saved
+ * session gives only `session_previous_id`.
+ */
+function write(sync = false) {
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
-  if (current) storage.setJSON(SESSION_KEY, current);
+  if (!current) return;
+  if (sync) storage.setJSON(SESSION_KEY, current);
+  else storage.setJSONAsync(SESSION_KEY, current);
 }
 
 function scheduleWrite() {
@@ -192,8 +202,10 @@ export function stopSession() {
 /**
  * Segment indices name the stored replay object, so they must never
  * repeat within a session. The counter is persisted with the session
- * and written through at once, because a lost increment would let the
- * next app start overwrite a stored segment.
+ * and written at once, because a lost increment would let the next app
+ * start overwrite a stored segment. The write is on the background
+ * thread, as every session write: the counter is in memory for this
+ * process, and a new process starts a new session at its first activity.
  */
 export function nextReplaySegmentIndex(): number {
   const s = getSession(false);
@@ -224,8 +236,9 @@ export function incrementSessionCount(eventType: string) {
   scheduleWrite();
 }
 
+/** Writes the session synchronously, on the way to the background. */
 export function flushSession() {
-  write();
+  write(true);
 }
 
 /** Test hook. */

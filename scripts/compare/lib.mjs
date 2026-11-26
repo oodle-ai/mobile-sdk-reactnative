@@ -118,6 +118,24 @@ export function readLaunchTimes(out) {
   return times;
 }
 export const readRequests = (out) => readNdjson(path.join(out, 'requests.ndjson'));
+
+/**
+ * The client spans that Oodle sent (spans.ndjson): { traceId, spanId,
+ * session, url } per span. A body that came again is stored again, so a
+ * span can be in the list more than once.
+ */
+export function readSpans(out) {
+  return readNdjson(path.join(out, 'spans.ndjson')).map(({ span }) => {
+    const attr = Object.fromEntries((span?.attributes ?? []).map((a) => [a.key, Object.values(a.value ?? {})[0]]));
+    return { traceId: span?.traceId, spanId: span?.spanId, session: attr['session.id'], url: attr['url.full'] };
+  });
+}
+
+/** The parts of a W3C traceparent value, or undefined when it is not one. */
+export function parseTraceparent(value) {
+  const m = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(String(value).trim());
+  return m ? { traceId: m[2], spanId: m[3], sampled: (parseInt(m[4], 16) & 1) === 1 } : undefined;
+}
 /** The requests that the stand-in app API got: { scenario, method, path, traceparents }. */
 export const readApiRequests = (out) => readNdjson(path.join(out, 'api-requests.ndjson'));
 
