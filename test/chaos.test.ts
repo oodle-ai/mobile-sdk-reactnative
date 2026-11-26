@@ -675,6 +675,29 @@ describe('a failure in the SDK never reaches the app', () => {
     expect(baseline.handled).toEqual(['app soft error fatal=false', 'app fatal fatal=true']);
   });
 
+  it('writes the outbox on the way to the background when a step before it fails', async () => {
+    freshModules();
+    nativeStore.clear();
+    fault.armed = false;
+    fault.injected = 0;
+    fault.native = 'none';
+    fault.collector = 'hangs';
+    fault.modules = new Set(['events/views.ts', 'core/session.ts']);
+    (globalThis as Record<string, unknown>).__oodleNative = fakeNative;
+    newWorld();
+    const rn = await import('./rn-stub');
+    rn.AppState.currentState = 'active';
+    const sdk = await import('../src/index');
+    (await import('../src/core/transport')).setPoster(poster as never);
+    sdk.OodleRum.init({ instanceId: 'inst', apiKey: 'key', endpoint: 'https://inst.collector.oodle.ai', service: 'chaos' });
+    sdk.OodleRum.addAction('before background');
+    fault.armed = true;
+    rn.emitAppState('background');
+    fault.armed = false;
+    expect(fault.injected).toBeGreaterThan(0);
+    expect(nativeStore.get('outbox') ?? '').toContain('before background');
+  });
+
   it('catches nothing when nothing fails and the app uses the API as documented', async () => {
     const r = await runCase({ name: 'healthy' });
     expect(r.seen).toEqual(baselines.ordinary.seen);

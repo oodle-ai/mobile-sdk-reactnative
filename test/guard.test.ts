@@ -156,3 +156,46 @@ describe('guard', () => {
     expect(takeCaughtErrors()).toBe(4);
   });
 });
+
+describe('the press tracking wrapper of React.createElement', () => {
+  afterEach(() => {
+    takeCaughtErrors();
+  });
+
+  it('gives the app its element when the SDK fails to read the props', async () => {
+    const React = (await import('react')).default;
+    const original = React.createElement;
+    const { installPressTracking } = await import('../src/events/press-tracking');
+    try {
+      expect(installPressTracking(() => {})).toBe(true);
+      // React reads only the own keys of the props; the SDK reads onPress
+      // by name, and that read throws.
+      const props = new Proxy(
+        { title: 'Pay' },
+        {
+          get(target, key) {
+            if (key === 'onPress') throw new Error('getter of the app');
+            return Reflect.get(target, key);
+          },
+        },
+      );
+      const el = React.createElement('Button', props) as unknown as { props: { title: string } };
+      expect(el.props.title).toBe('Pay');
+      expect(takeCaughtErrors()).toBe(1);
+    } finally {
+      React.createElement = original;
+    }
+  });
+
+  it("gives the result and the error of the app's press handler unchanged", async () => {
+    const { withPressHandlers } = await import('../src/events/press-tracking');
+    const props = withPressHandlers({
+      onPress: (x: number) => x * 2,
+      onLongPress: () => {
+        throw new Error('app bug');
+      },
+    }) as { onPress: (x: number) => number; onLongPress: () => void };
+    expect(props.onPress(21)).toBe(42);
+    expect(() => props.onLongPress()).toThrow('app bug');
+  });
+});
