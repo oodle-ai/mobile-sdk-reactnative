@@ -23,6 +23,40 @@
   any signal within 10 s of a fatal JS error is not sent, as for SIGABRT
   before.
 
+### A bug in the SDK does not reach the app
+
+- All SDK code that the app's thread runs goes through one guard
+  (`src/core/guard.ts`): each method of `OodleRum` and
+  `OodleSessionReplay`, each timer, each listener, and the SDK's part of
+  each wrapper (fetch, XHR, console, `React.createElement`, press
+  handlers, the global error handler). An exception in SDK code is logged
+  (the first one as a warning) and the SDK goes on. The app's own
+  functions run outside the guard, so their results and errors are as
+  before.
+- The SDK telemetry has `sdk_internal_errors`: the number of exceptions
+  that the guard caught. The app does not crash on them, so this counter
+  is how a bug in the SDK shows.
+- Fixed: a native module that gives JSON of an unexpected form (`null`,
+  a number) made the 5 s ANR timer throw, which ends a release app.
+- Fixed: `setUser`, `setTags`, `addFeatureFlag` and `trackNavigation`
+  threw into the app for some values (a BigInt, an object whose getters
+  throw, a `null` ref). A fetch with a headers object that throws on
+  `forEach` threw before the app's fetch ran.
+- Fixed: a failed upload could leave a rejected promise, which the SDK's
+  own tracker then reported as an unhandled rejection of the app.
+- Fixed: a step that failed on the way to the background stopped the
+  steps after it, also the outbox write; the events of that moment were
+  lost. Each step now runs on its own.
+- Fixed: a `Date` header in the year 275760 (from a proxy) made every
+  timestamp invalid, and a date of 1970 or 9999 moved the events by years.
+  A date outside 2020 to 2100 is not used.
+- Android: each callback that the platform calls (lifecycle, the
+  watchdog thread, posted blocks, frame callbacks, executor tasks) is
+  guarded. The ANR watchdog thread ended the app on an exception other
+  than its stop.
+- iOS: fixed traps in Swift: a view with a NaN size (the picture key), a
+  NaN color component, and a negative byte in the device model name.
+
 ### Performance
 
 - Less file work on the JS thread. The session and the saved context

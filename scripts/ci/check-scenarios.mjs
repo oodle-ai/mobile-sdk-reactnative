@@ -11,6 +11,10 @@
 // For the offline scenario: each action made while offline arrives once,
 // after the app was killed and started again.
 //
+// For the collector-garbage scenario: while the collector answered each
+// upload with garbage, the app ran its walk to the end and still ran
+// after it, and neither SDK reported a crash.
+//
 // Usage: check-scenarios.mjs --out <collector dir> --platform android|ios
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,7 +32,8 @@ const reference = readNdjson(path.join(out, 'reference.ndjson'));
 const scenariosFile = path.join(out, 'scenarios.txt');
 const ran = fs.existsSync(scenariosFile) ? fs.readFileSync(scenariosFile, 'utf8').split('\n').filter(Boolean) : [];
 
-const required = ['js-fatal', 'offline', platform === 'android' ? 'jvm-crash' : 'signal-crash'];
+const GARBAGE = 'collector-garbage';
+const required = ['js-fatal', 'offline', GARBAGE, platform === 'android' ? 'jvm-crash' : 'signal-crash'];
 for (const name of required) check(ran.includes(name), `scenario ${name} ran`);
 
 /** The session that a scenario ran in, from the action the app sent first. */
@@ -45,7 +50,7 @@ const referenceBodies = (name) =>
     .map((u) => u.body)
     .join('\n');
 
-for (const name of ran.filter((n) => n !== 'offline')) {
+for (const name of ran.filter((n) => n !== 'offline' && n !== GARBAGE)) {
   const session = scenarioSession(name);
   if (!session) continue;
   const crashes = events.filter((e) => e.event_type === 'error' && e.error_is_crash === 1 && e.session_id === session);
@@ -70,6 +75,17 @@ if (ran.includes('offline')) {
     check(sent.length === 1, `scenario offline: "Offline action ${n}" arrived once (${sent.length})`);
     check(sent[0]?.session_id === session, `scenario offline: "Offline action ${n}" is on the offline session`);
   }
+}
+
+if (ran.includes(GARBAGE)) {
+  const session = scenarioSession(GARBAGE);
+  const done = events.filter((e) => e.event_type === 'action' && e.action_name === `soak:done:${GARBAGE}`);
+  check(done.length === 1, `scenario ${GARBAGE}: the app ran its walk to the end (${done.length})`);
+  const state = fs.readFileSync(path.join(out, `${GARBAGE}.txt`), 'utf8').trim();
+  check(state === 'app-runs', `scenario ${GARBAGE}: the app still ran after the walk (${state})`);
+  const crashes = events.filter((e) => e.error_is_crash === 1 && e.session_id === session);
+  check(crashes.length === 0, `scenario ${GARBAGE}: no crash on its session (${crashes.length})`);
+  check(!/"is_crash"\s*:\s*true/.test(referenceBodies(GARBAGE)), `scenario ${GARBAGE}: the reference SDK reported no crash`);
 }
 
 // The mock collector stores a body with the same batch id once, as the

@@ -36,7 +36,10 @@
 // launch on both platforms: from the scenario set to the app's read
 // (JS runs) and to its ready call (scripts/compare/cost.mjs).
 // While `offline` is true, uploads get a reset connection, as when the
-// device has no network.
+// device has no network. While `collector` is "garbage", each Oodle upload
+// is stored as usual and then gets an answer of the wrong form, in turn
+// (GARBAGE_REPLIES): the SDK must keep the app running whatever the
+// collector or a proxy on the way answers.
 // Usage: node scripts/mock-collector.mjs [--port 4318] [--api-port 4319] [--out .collector]
 import crypto from 'node:crypto';
 import http from 'node:http';
@@ -62,7 +65,7 @@ const referenceReplayFile = path.join(out, 'reference-replay.ndjson');
 const spansFile = path.join(out, 'spans.ndjson');
 const fixtureFile = path.join(out, 'fixture.ndjson');
 
-const DEFAULT_SCENARIO = { name: 'none', order: 'oodle-first', offline: false };
+const DEFAULT_SCENARIO = { name: 'none', order: 'oodle-first', offline: false, collector: 'ok' };
 let scenario = DEFAULT_SCENARIO;
 /** The X-Oodle-Batch-Id of each body stored. */
 const seenBatches = new Set();
@@ -263,6 +266,47 @@ async function handleTraces(req, res) {
   res.writeHead(200, { 'Content-Type': 'application/json' }).end('{}');
 }
 
+/**
+ * Answers of the wrong form, for the collector-garbage scenario. Each
+ * Oodle upload gets the next one, after it is stored.
+ */
+const GARBAGE_REPLIES = [
+  // A captive portal or a proxy: a page, with success.
+  (send) => send(200, { 'Content-Type': 'text/html', Date: 'not a date' }, '<html><body>Sign in to Wi-Fi</body></html>'),
+  (send) => send(413, { 'X-Oodle-Rate-Limits': 'events:;;:abc,:-1,replay:1e999' }, 'too large'),
+  (send) => send(500, { 'Content-Type': 'application/json', 'Retry-After': 'soon' }, '{"error":'),
+  (send) => send(429, { 'X-Oodle-Rate-Limits': 'events:NaN;replay', Date: 'Thu, 01 Jan 1970 00:00:00 GMT' }, ''),
+  (send) => send(202, { Date: 'Fri, 31 Dec 9999 23:59:59 GMT' }, 'x'.repeat(100_000)),
+  // An answer that stops in the middle.
+  (_send, res) => {
+    res.writeHead(202, { 'Content-Length': '1000' });
+    res.write('{"partial":');
+    setTimeout(() => res.socket?.destroy(), 100);
+  },
+  // No answer before the SDK's timeout.
+  (send) => setTimeout(() => send(202, {}, ''), 40_000),
+  (_send, res) => res.socket?.destroy(),
+];
+let garbageReplies = 0;
+
+/** Replaces the answer that the handler gives with the next garbage answer. */
+function garble(req, res) {
+  const reply = GARBAGE_REPLIES[garbageReplies++ % GARBAGE_REPLIES.length];
+  const writeHead = res.writeHead.bind(res);
+  const end = res.end.bind(res);
+  const send = (status, headers, body) => {
+    if (res.destroyed || res.headersSent) return;
+    writeHead(status, headers);
+    end(body);
+  };
+  res.writeHead = () => res;
+  res.end = () => {
+    console.log(`${new Date().toISOString()} garbage answer ${garbageReplies % GARBAGE_REPLIES.length} to ${req.url}`);
+    reply(send, Object.assign(res, { writeHead, end }));
+    return res;
+  };
+}
+
 const server = http.createServer((req, res) => {
   const route = req.url.startsWith('/fixture/scenario') || req.url.startsWith('/fixture/ready')
     ? handleFixture
@@ -284,6 +328,7 @@ const server = http.createServer((req, res) => {
     req.socket.destroy();
     return;
   }
+  if (scenario.collector === 'garbage' && (route === handleIngest || route === handleTraces)) garble(req, res);
   route(req, res).catch((e) => {
     console.log('400', e.message);
     res.writeHead(400).end(String(e.message));

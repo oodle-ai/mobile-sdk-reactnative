@@ -1,5 +1,6 @@
 import { uuid } from './ids';
 import { storage } from './native';
+import { safeTimeout } from './guard';
 
 const SESSION_KEY = 'session';
 /** A session ends after this much time with no activity. */
@@ -59,7 +60,7 @@ function write(sync = false) {
 
 function scheduleWrite() {
   if (saveTimer) return;
-  saveTimer = setTimeout(() => {
+  saveTimer = safeTimeout(() => {
     saveTimer = null;
     write();
   }, 1000);

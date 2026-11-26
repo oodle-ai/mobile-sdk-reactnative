@@ -76,6 +76,25 @@ function parse<T>(raw: string | null | undefined, fallback: T): T {
   }
 }
 
+function isObject(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * The JSON object that native code gave, or null. Native code of another
+ * version (an over-the-air JS update) can give another form.
+ */
+function parseObject(raw: unknown): Record<string, unknown> | null {
+  const v = typeof raw === 'string' ? parse<unknown>(raw, null) : null;
+  return isObject(v) ? v : null;
+}
+
+/** The objects of a JSON array that native code gave; [] for another form. */
+function parseObjects(raw: unknown): Array<Record<string, unknown>> {
+  const v = typeof raw === 'string' ? parse<unknown>(raw, null) : null;
+  return Array.isArray(v) ? v.filter(isObject) : [];
+}
+
 function call<T>(fn: (m: Spec) => T, fallback: T): T {
   if (!mod) return fallback;
   try {
@@ -117,7 +136,7 @@ export function getDeviceInfo(): DeviceInfo {
   if (deviceInfo) return deviceInfo;
   const fallback = jsDeviceInfo();
   const raw = call((m) => m.getDeviceInfo(), '');
-  deviceInfo = { ...fallback, ...parse<Partial<DeviceInfo>>(raw, {}) };
+  deviceInfo = { ...fallback, ...(parseObject(raw) as Partial<DeviceInfo> | null) };
   return deviceInfo;
 }
 
@@ -126,7 +145,8 @@ const memory = new Map<string, string>();
 export const storage = {
   get(key: string): string | null {
     if (!mod) return memory.get(key) ?? null;
-    return call((m) => m.storageGet(key), null);
+    const v = call((m) => m.storageGet(key), null);
+    return typeof v === 'string' ? v : null;
   },
   set(key: string, value: string): boolean {
     if (!mod) {
@@ -210,18 +230,24 @@ export const native = {
     }
   },
   enableCrashReporting: () => call((m) => m.enableCrashReporting(), false),
-  consumePendingCrash: (): NativeCrash | null =>
-    parse<NativeCrash | null>(call((m) => m.consumePendingCrash(), null), null),
+  consumePendingCrash: (): NativeCrash | null => {
+    const c = parseObject(call((m) => m.consumePendingCrash(), null));
+    return c && typeof c.type === 'string' ? (c as unknown as NativeCrash) : null;
+  },
   startWatchdog: (ms: number) => call((m) => m.startWatchdog(ms), false),
   // Native code older than this JS (an OTA update) has no stop methods.
   stopWatchdog: () => call((m) => (typeof m.stopWatchdog === 'function' ? m.stopWatchdog() : false), false),
   drainNativeEvents: (): NativeEvent[] =>
-    parse<NativeEvent[]>(call((m) => m.drainNativeEvents(), '[]'), []),
+    parseObjects(call((m) => m.drainNativeEvents(), '[]')).filter(
+      (e) => typeof e.type === 'string' && typeof e.timestamp === 'number',
+    ) as unknown as NativeEvent[],
   startVitals: () => call((m) => m.startVitals(), false),
   stopVitals: () => call((m) => (typeof m.stopVitals === 'function' ? m.stopVitals() : false), false),
-  collectVitals: (): NativeVitals =>
-    parse<NativeVitals>(call((m) => m.collectVitals(), '{}'), {}),
-  getConnectivity: () => call((m) => m.getConnectivity(), 'unknown'),
+  collectVitals: (): NativeVitals => (parseObject(call((m) => m.collectVitals(), '{}')) ?? {}) as NativeVitals,
+  getConnectivity: () => {
+    const v = call((m) => m.getConnectivity(), 'unknown');
+    return typeof v === 'string' ? v : 'unknown';
+  },
   captureWireframes(options: unknown): Promise<string> {
     if (!mod) return Promise.reject(new Error('native module missing'));
     try {

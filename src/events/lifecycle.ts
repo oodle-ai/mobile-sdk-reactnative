@@ -8,6 +8,7 @@ import { drainNativeEvents } from './errors';
 import { releaseTap } from './held-tap';
 import { startLongTaskTracking, stopLongTaskTracking } from './longtasks';
 import { flushActiveView, pauseViews, resumeViews } from './views';
+import { guard, guarded, safeInterval } from '../core/guard';
 
 /**
  * The app state field of the OpenTelemetry `device.app.lifecycle` event
@@ -35,7 +36,7 @@ export function isForeground(): boolean {
 
 function startDrain() {
   if (drainTimer) return;
-  drainTimer = setInterval(drainNativeEvents, NATIVE_DRAIN_MS);
+  drainTimer = safeInterval(drainNativeEvents, NATIVE_DRAIN_MS);
 }
 
 function stopDrain() {
@@ -43,42 +44,47 @@ function stopDrain() {
   drainTimer = null;
 }
 
+/**
+ * Each step runs in a guard of its own: a step that fails does not stop
+ * the steps after it. The last step writes the outbox, which must run.
+ */
 function toBackground() {
   if (!foreground) return;
   foreground = false;
-  stopLongTaskTracking();
-  stopDrain();
-  drainNativeEvents();
+  guard(stopLongTaskTracking);
+  guard(stopDrain);
+  guard(drainNativeEvents);
   // The open tap goes into the outbox that is written below.
-  releaseTap();
-  flushActiveView();
-  emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'background' }, false);
-  pauseViews();
-  hooks.onBackground?.();
-  saveLastContext({ sync: true });
-  flushSession();
-  flush();
+  guard(releaseTap);
+  guard(flushActiveView);
+  guard(() => emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'background' }, false));
+  guard(pauseViews);
+  guard(() => hooks.onBackground?.());
+  guard(() => saveLastContext({ sync: true }));
+  guard(flushSession);
+  guard(flush);
   // The OS can end a background app without warning, and a backgrounded
   // app can get so little CPU that a write queued on a native background
   // queue does not run before that: the events of this moment, sent just
   // now and not answered yet, were then lost. The write is done now, while
   // the JS thread runs; the app draws no frames in the background.
-  persistOutbox({ sync: true });
+  guard(() => persistOutbox({ sync: true }));
 }
 
+/** As toBackground, each step in a guard of its own. */
 function toForeground() {
   if (foreground) return;
   foreground = true;
-  const newSession = isSessionExpired();
-  refreshConnectivity();
+  const newSession = guard(isSessionExpired, false);
+  guard(refreshConnectivity);
   // In a new session the hide belongs to the old one, so there is no
   // return to pair it with.
-  if (!newSession) emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'foreground' });
-  resumeViews();
-  hooks.onForeground?.(newSession);
-  drainNativeEvents();
-  startDrain();
-  startLongTaskTracking();
+  if (!newSession) guard(() => emit({ event_type: 'visibility', [APP_STATE_FIELD]: 'foreground' }));
+  guard(resumeViews);
+  guard(() => hooks.onForeground?.(newSession));
+  guard(drainNativeEvents);
+  guard(startDrain);
+  guard(startLongTaskTracking);
 }
 
 function onChange(state: AppStateStatus) {
@@ -94,7 +100,7 @@ export function installLifecycle(h: LifecycleHooks) {
   hooks = h;
   if (subscription) return;
   foreground = AppState.currentState !== 'background';
-  subscription = AppState.addEventListener('change', onChange);
+  subscription = AppState.addEventListener('change', guarded(onChange));
   if (foreground) {
     startDrain();
     startLongTaskTracking();

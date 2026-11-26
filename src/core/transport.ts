@@ -10,6 +10,7 @@ import { native, storage } from './native';
 import { estimateJsonBytes } from './size';
 import { buildTraceBody } from './otlp';
 import { incrTelemetry } from './telemetry';
+import { guardPromise, safeTimeout } from './guard';
 
 type Payload = Record<string, unknown>;
 
@@ -296,7 +297,7 @@ export function upsert(
 function scheduleQueuePersist() {
   const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
   if (queuePersistTimer || interval <= QUEUE_PERSIST_MS) return;
-  queuePersistTimer = setTimeout(() => {
+  queuePersistTimer = safeTimeout(() => {
     queuePersistTimer = null;
     if (hasQueuedItems()) persistOutbox();
   }, QUEUE_PERSIST_MS);
@@ -305,7 +306,7 @@ function scheduleQueuePersist() {
 function scheduleFlush() {
   if (flushTimer) return;
   const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
-  flushTimer = setTimeout(() => {
+  flushTimer = safeTimeout(() => {
     flushTimer = null;
     flush();
   }, interval);
@@ -389,7 +390,7 @@ export function flush() {
     } else {
       // sendBody puts the body in flight (or in the retry queue) before it
       // waits for the answer.
-      void sendBody(item);
+      guardPromise(sendBody(item));
     }
   }
   // The outbox holds the items of this body as queued items. If the app
@@ -426,7 +427,7 @@ export function holdSends(held: boolean) {
   // send in that moment is what the hold is for.
   if (held) return;
   const interval = getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS;
-  setTimeout(() => {
+  safeTimeout(() => {
     flush();
     drainRetries();
   }, interval);
@@ -667,7 +668,7 @@ function drainRetries() {
     }
     const wait = head.notBefore - Date.now();
     if (wait > 0) {
-      retryTimer = setTimeout(() => {
+      retryTimer = safeTimeout(() => {
         retryTimer = null;
         drainRetries();
       }, wait);
@@ -675,7 +676,7 @@ function drainRetries() {
     }
     retryQueue.shift();
     retryBytes -= head.body.length;
-    void sendBody(head);
+    guardPromise(sendBody(head));
   }
 }
 
@@ -688,7 +689,7 @@ interface Outbox {
 
 function schedulePersist() {
   if (persistTimer) return;
-  persistTimer = setTimeout(() => {
+  persistTimer = safeTimeout(() => {
     persistTimer = null;
     persistOutbox();
   }, 2000);
@@ -787,7 +788,7 @@ export function hasQueuedItems(): boolean {
 
 function scheduleRetryDrain() {
   if (retryTimer || retryQueue.length === 0) return;
-  retryTimer = setTimeout(() => {
+  retryTimer = safeTimeout(() => {
     retryTimer = null;
     drainRetries();
   }, getConfig()?.flushIntervalMs ?? DEFAULT_FLUSH_INTERVAL_MS);

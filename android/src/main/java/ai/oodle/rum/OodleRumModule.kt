@@ -19,18 +19,18 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
   }
 
   override fun onHostResume() {
-    Vitals.resume()
-    Watchdog.resume()
+    safely { Vitals.resume() }
+    safely { Watchdog.resume() }
   }
 
   override fun onHostPause() {
-    Vitals.pause()
-    Watchdog.pause()
+    safely { Vitals.pause() }
+    safely { Watchdog.pause() }
   }
 
   override fun onHostDestroy() {
-    Vitals.pause()
-    Watchdog.pause()
+    safely { Vitals.pause() }
+    safely { Watchdog.pause() }
   }
 
   override fun invalidate() {
@@ -79,11 +79,13 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
   override fun captureWireframes(optionsJson: String, promise: Promise) {
     val options = safe(JSONObject()) { JSONObject(optionsJson) }
     UiThreadUtil.runOnUiThread {
-      val reject = { t: Throwable -> promise.reject("capture_failed", t.message ?: t.javaClass.name, t) }
-      try {
-        WireframeCapture.capture(reactApplicationContext.currentActivity, options, { promise.resolve(it) }, reject)
-      } catch (t: Throwable) {
-        reject(t)
+      safely {
+        val reject = { t: Throwable -> promise.reject("capture_failed", t.message ?: t.javaClass.name, t) }
+        try {
+          WireframeCapture.capture(reactApplicationContext.currentActivity, options, { promise.resolve(it) }, reject)
+        } catch (t: Throwable) {
+          reject(t)
+        }
       }
     }
   }
@@ -95,13 +97,6 @@ class OodleRumModule(reactContext: ReactApplicationContext) :
   override fun postGzip(url: String, headersJson: String, body: String, promise: Promise) {
     promise.reject("unsupported", "postGzip is used on iOS only")
   }
-
-  private inline fun <T> safe(fallback: T, block: () -> T): T =
-    try {
-      block()
-    } catch (t: Throwable) {
-      fallback
-    }
 
   companion object {
     const val NAME = "OodleRum"

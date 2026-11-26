@@ -7,6 +7,13 @@
 
 /** The `Date` header has a resolution of one second, so smaller offsets are noise. */
 const MIN_OFFSET_MS = 2000;
+/**
+ * The collector's clock is right. A `Date` header outside these years
+ * comes from something on the way (a captive portal, a proxy), and is not
+ * used: a date in the year 275760 made every timestamp invalid.
+ */
+const MIN_SERVER_MS = Date.UTC(2020, 0, 1);
+const MAX_SERVER_MS = Date.UTC(2100, 0, 1);
 
 let offsetMs = 0;
 
@@ -17,7 +24,11 @@ export function clockOffset(): number {
 
 /** A device time in milliseconds as a corrected ISO timestamp. */
 export function isoTime(deviceMs: number = Date.now()): string {
-  return new Date(deviceMs + offsetMs).toISOString();
+  const corrected = new Date(deviceMs + offsetMs);
+  if (Number.isFinite(corrected.getTime())) return corrected.toISOString();
+  // toISOString() throws on an invalid date.
+  const device = new Date(deviceMs);
+  return (Number.isFinite(device.getTime()) ? device : new Date()).toISOString();
 }
 
 /**
@@ -29,7 +40,7 @@ export function isoTime(deviceMs: number = Date.now()): string {
 export function observeServerDate(header: string | null | undefined, sentAt: number, receivedAt: number) {
   if (!header) return;
   const server = Date.parse(header);
-  if (!Number.isFinite(server) || receivedAt < sentAt) return;
+  if (!Number.isFinite(server) || server < MIN_SERVER_MS || server >= MAX_SERVER_MS || receivedAt < sentAt) return;
   // The header drops the milliseconds, so the server time is in the
   // second after `server`.
   const measured = server + 500 - (sentAt + receivedAt) / 2;

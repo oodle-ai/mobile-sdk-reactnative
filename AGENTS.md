@@ -114,6 +114,56 @@ keeps these rules (`src/core/transport.ts`):
   JS thread. Android compresses a string body itself. The envelope header
   has `sdk_name: "react-native"` and `sdk_version`.
 
+## A bug in the SDK never reaches the app
+
+An exception that leaves SDK code ends a release app, and the app's
+owners cannot fix it. All SDK code that the app's thread runs goes
+through `src/core/guard.ts`. The guard logs each exception that it
+catches and counts it in the SDK telemetry (`sdk_internal_errors`): with
+no crash, that counter is the only sign of an SDK bug.
+
+- The public API objects are made with `guardApi`.
+- Timers use `safeTimeout`, `safeInterval` and `safeFrame`. A listener
+  is given as `guarded(fn)` at the call that adds it. A promise that
+  nothing waits for ends in `guardPromise`. `test/guard.test.ts` fails
+  on a raw timer, listener or `void` promise in `src/`. A callback that
+  must run the app's code outside the guard has a comment
+  `// unguarded: <reason>` on the line before it.
+- In a wrapper around an app function (fetch, XHR, console,
+  `React.createElement`, a press handler, the global error handler), the
+  SDK's part runs in `guard()` and the app's function runs outside it.
+  Its result, its exceptions and its arguments reach the app unchanged.
+  When the SDK's part fails, the app's call goes on as with no SDK.
+- Code at module load runs outside any call of the app. Keep it to
+  declarations; put a call there in `guard()`.
+
+`test/chaos.test.ts` breaks one part at a time (the native module throws
+or gives values of the wrong form, the collector fails, each SDK module's
+functions throw) and runs the same app script as with no SDK. The app
+must see the same results, errors, console lines and global handler
+calls, with no exception from a timer and no promise left rejected. A
+new hook into the app needs a step in that script. `test/fuzz.test.ts`
+gives the API and the wrappers seeded random values (hostile ones too);
+`FUZZ_SEED` repeats a failure.
+
+- Each step on the way to the background, and back, has a guard of its
+  own, so a step that fails does not stop the outbox write.
+- The native bridge (`src/core/native.ts`) checks the form of the JSON
+  that native code gives. Native code of another version (an
+  over-the-air JS update) can give another form.
+- A `Date` header outside 2020 to 2100 does not set the clock offset: it
+  comes from a captive portal or a proxy, not from the collector.
+- Android: each callback that the platform calls runs its body in
+  `safely { }` (`Safe.kt`). An exception on any thread ends the app.
+- iOS: Swift cannot catch a trap. No `as!`, `try!` or force unwrap, and
+  a floating value becomes an integer only through `finiteInt` or
+  `finiteInt64`. A line that needs one has `// force: <reason>` or
+  `// trap-free: <reason>` on the line before it.
+- `test/guard.test.ts` checks these rules in `src/`, `android/` and
+  `ios/`. The device run has the `collector-garbage` scenario: the mock
+  collector answers each upload with garbage, and the app must finish its
+  walk and still run.
+
 ## Only user activity starts a session
 
 A session ends after 15 minutes without user activity (`SESSION_TIMEOUT_MS`).
@@ -214,7 +264,7 @@ react-native. `test/sdk.test.ts` drives the full pipeline with a fake
 native module and fake XHR.
 
 CI also runs the Fieldwork fixture on a device (`scripts/ci/`): a smoke
-run, then crash and offline scenarios. The app reads each scenario from
+run, then crash, offline and collector-garbage scenarios. The app reads each scenario from
 the mock collector (`/fixture/scenario`), so a new scenario needs no
 native change to the app. A scenario that must end the app from outside
 (a signal, `am crash`, a kill) does that in `scenarios.sh`; the app only

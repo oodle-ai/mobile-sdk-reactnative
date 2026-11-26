@@ -1,3 +1,4 @@
+import { guardApi } from './core/guard';
 import { isRecording, startRecording, stopRecording } from './replay/recorder';
 
 export { OodleRum } from './rum';
@@ -25,10 +26,13 @@ export type { UserInfo } from './core/user';
 export { SDK_VERSION } from './version';
 
 /** Session replay controls. Recording also needs consent `granted`. */
-export const OodleSessionReplay = {
-  /** Starts recording, if the session is sampled for replay. */
-  start: startRecording,
-  /** Stops recording. Already recorded segments are still sent. */
-  stop: stopRecording,
-  isRecording,
-};
+export const OodleSessionReplay = guardApi(
+  {
+    /** Starts recording, if the session is sampled for replay. */
+    start: startRecording,
+    /** Stops recording. Already recorded segments are still sent. */
+    stop: stopRecording,
+    isRecording,
+  },
+  { isRecording: false },
+);

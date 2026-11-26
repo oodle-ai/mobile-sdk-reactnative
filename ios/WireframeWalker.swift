@@ -433,7 +433,7 @@ final class WireframeWalker {
     if privacy == "mask" { return n }
     let size = view.bounds.size
     if size.width > Self.pictureMaxPoints || size.height > Self.pictureMaxPoints { return n }
-    let key = "\(Int(size.width.rounded()))x\(Int(size.height.rounded()))|\(content ?? "")"
+    let key = "\(finiteInt(size.width.rounded()))x\(finiteInt(size.height.rounded()))|\(content ?? "")"
     let now = CACurrentMediaTime()
     // While a new picture is encoded, the node keeps the last one.
     let cached = Self.pictures.object(forKey: view)
@@ -520,6 +520,7 @@ final class WireframeWalker {
     }
     for layer in layers {
       guard let contents = layer.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID else { continue }
+      // force: CFGetTypeID above checked the type, and a cast to a CF type cannot be conditional.
       let image = contents as! CGImage
       let scale = layer.contentsScale
       let drawn: (width: CGFloat, color: UIColor?)?
@@ -645,7 +646,7 @@ final class WireframeWalker {
         b = white
       }
     }
-    func byte(_ v: CGFloat) -> Int { Int((min(max(v, 0), 1) * 255).rounded()) }
+    func byte(_ v: CGFloat) -> Int { finiteInt((min(max(v, 0), 1) * 255).rounded()) }
     return String(format: "#%02x%02x%02x%02x", byte(r), byte(g), byte(b), byte(a))
   }
 

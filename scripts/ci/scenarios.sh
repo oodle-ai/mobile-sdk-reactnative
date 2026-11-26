@@ -79,6 +79,11 @@ wait_for() {
   return 1
 }
 
+# set_scenario_json <json>: a scenario with fields that set_scenario does not set.
+set_scenario_json() {
+  curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$1" > /dev/null
+}
+
 count() {
   local n
   n=$(grep -cF "$1" "$EVENTS" 2> /dev/null) || true
@@ -92,6 +97,7 @@ pid_gone() { ! app_pid | tr ' ' '\n' | grep -x "$1" > /dev/null; }
 more_crashes_than() { [ "$(count '"error_is_crash":1')" -gt "$1" ]; }
 reference_crash() { grep -F "\"scenario\":\"$1\"" "$REFERENCE" 2> /dev/null | grep -q 'is_crash'; }
 offline_actions_sent() { [ "$(count '"action_name":"Offline action')" -ge 3 ]; }
+walk_done() { [ "$(count "\"action_name\":\"soak:done:$1\"")" -gt 0 ]; }
 
 # crash_run <name> <order> <self|jvm|signal>
 crash_run() {
@@ -147,6 +153,24 @@ set_scenario after-offline
 start_app
 wait_for "the offline actions" 60 offline_actions_sent
 echo offline >> "$RAN"
+
+# The collector answers each Oodle upload with garbage: a page with
+# success, 4xx and 5xx with bad headers, a cut answer, no answer, a reset
+# (scripts/mock-collector.mjs, GARBAGE_REPLIES). The app must run its soak
+# walk to the end and still run after it. A start with the collector back
+# to normal then sends a crash, if the SDK ended the app.
+echo "--- scenario collector-garbage"
+set_scenario_json '{"name":"collector-garbage","collector":"garbage","steps":24,"seed":7}'
+start_app
+wait_for "the app to send scenario:collector-garbage" 60 armed collector-garbage
+wait_for "the walk of collector-garbage to end" 120 walk_done collector-garbage
+# Time for more uploads, with their garbage answers and retries.
+sleep 20
+if app_gone; then echo "app-ended" > "$OUT/collector-garbage.txt"; else echo "app-runs" > "$OUT/collector-garbage.txt"; fi
+set_scenario after-collector-garbage
+start_app
+sleep 20
+echo collector-garbage >> "$RAN"
 
 set_scenario none
 node "$HERE/check-scenarios.mjs" --out "$OUT" --platform "$PLATFORM"

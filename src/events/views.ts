@@ -7,6 +7,7 @@ import { attributesJSON, canRecord, emitViewUpdate, setViewCounter, type EventDa
 import { releaseTap } from './held-tap';
 import { setCurrentViewInfo, type ViewInfo } from './view-state';
 import { isoTime } from '../core/clock';
+import { guard, safeFrame, safeInterval, safeTimeout } from '../core/guard';
 
 /** How often an open view is re-sent with its time spent so far. */
 const VIEW_REFRESH_MS = 30_000;
@@ -194,17 +195,18 @@ function countInView(data: EventData) {
   }
   if (throttleTimer) return;
   const view = active;
-  throttleTimer = setTimeout(() => {
+  throttleTimer = safeTimeout(() => {
     throttleTimer = null;
     if (active === view) send(view, false);
   }, UPDATE_THROTTLE_MS);
 }
 
-setViewCounter(countInView);
+// At module load, outside any call of the app: a failure must not stop the import.
+guard(() => setViewCounter(countInView));
 
 function ensureRefreshTimer() {
   if (refreshTimer) return;
-  refreshTimer = setInterval(() => {
+  refreshTimer = safeInterval(() => {
     if (active) send(active, false);
   }, VIEW_REFRESH_MS);
 }
@@ -227,11 +229,7 @@ function measureColdStart(view: ActiveView) {
     if (active === view) send(view, false);
   };
   // The frame after the first view's render is the first one the user sees.
-  if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(() => setTimeout(done, 0));
-  } else {
-    setTimeout(done, 0);
-  }
+  safeFrame(done);
 }
 
 export function startView(

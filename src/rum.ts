@@ -60,6 +60,7 @@ import {
   syncRecording,
 } from './replay/recorder';
 import { isoTime } from './core/clock';
+import { guard, guardApi, safeFrame, safeInterval } from './core/guard';
 
 const TELEMETRY_INTERVAL_MS = 60_000;
 const MAX_BUFFERED_CALLS = 100;
@@ -71,11 +72,7 @@ let buffered: Array<() => void> = [];
 
 function whenReady(fn: () => void) {
   if (initialized) {
-    try {
-      fn();
-    } catch (e) {
-      logger.debug('call failed', e);
-    }
+    guard(fn);
     return;
   }
   if (buffered.length < MAX_BUFFERED_CALLS) buffered.push(fn);
@@ -90,16 +87,6 @@ function flushTelemetry() {
     session_id: peekSession()?.id ?? '',
     ...counters,
   });
-}
-
-/**
- * Runs `fn` after the next frame. init() can run inside the first render
- * (OodleProvider), so work that can wait goes after it.
- */
-function afterFirstFrame(fn: () => void) {
-  const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }).requestAnimationFrame;
-  if (typeof raf === 'function') raf(() => setTimeout(fn, 0));
-  else setTimeout(fn, 0);
 }
 
 /**
@@ -180,7 +167,7 @@ function initUnchecked(input: OodleRumConfig): boolean {
   // A crash from the last run is queued now and must reach disk at once.
   // Otherwise the outbox is read after the first frame: it can be 4 MB.
   if (hasQueuedItems()) restoreOutbox();
-  else deferRestoreOutbox(afterFirstFrame);
+  else deferRestoreOutbox(safeFrame);
 
   // Taps count only when they press something, as in the reference SDK.
   if (config.trackInteractions) installPressTracking(actions.pressed);
@@ -195,7 +182,7 @@ function initUnchecked(input: OodleRumConfig): boolean {
     onForeground: () => onReplayForeground(),
   });
   syncCollectors();
-  telemetryTimer = setInterval(flushTelemetry, TELEMETRY_INTERVAL_MS);
+  telemetryTimer = safeInterval(flushTelemetry, TELEMETRY_INTERVAL_MS);
 
   initialized = true;
   const calls = buffered;
@@ -207,141 +194,148 @@ function initUnchecked(input: OodleRumConfig): boolean {
   return true;
 }
 
-export const OodleRum = {
-  /**
-   * Starts the SDK. Call it once, as early as possible. Returns false when
-   * the configuration is not usable; the reason is logged. All other
-   * methods are safe to call before init(), or when it is never called.
-   */
-  init,
+/**
+ * The public API. Each method is guarded (guardApi): a failure in the SDK
+ * gives the fallback value below, and never reaches the app.
+ */
+export const OodleRum = guardApi(
+  {
+    /**
+     * Starts the SDK. Call it once, as early as possible. Returns false when
+     * the configuration is not usable; the reason is logged. All other
+     * methods are safe to call before init(), or when it is never called.
+     */
+    init,
 
-  isInitialized(): boolean {
-    return initialized;
-  },
+    isInitialized(): boolean {
+      return initialized;
+    },
 
-  /** Starts a screen view. A view with another key stops the current one. */
-  startView(key: string, name?: string, attributes?: Record<string, unknown>) {
-    const at = Date.now();
-    whenReady(() => views.startView(key, name, attributes, at));
-  },
+    /** Starts a screen view. A view with another key stops the current one. */
+    startView(key: string, name?: string, attributes?: Record<string, unknown>) {
+      const at = Date.now();
+      whenReady(() => views.startView(key, name, attributes, at));
+    },
 
-  stopView(key?: string) {
-    whenReady(() => views.stopView(key));
-  },
+    stopView(key?: string) {
+      whenReady(() => views.stopView(key));
+    },
 
-  /** Records a named user action. */
-  addAction(name: string, attributes?: Record<string, unknown>) {
-    whenReady(() => actions.addAction(name, attributes));
-  },
+    /** Records a named user action. */
+    addAction(name: string, attributes?: Record<string, unknown>) {
+      whenReady(() => actions.addAction(name, attributes));
+    },
 
-  /** Records a handled error. */
-  addError(error: unknown, attributes?: Record<string, unknown>) {
-    whenReady(() => recordError(error, attributes, 'custom'));
-  },
+    /** Records a handled error. */
+    addError(error: unknown, attributes?: Record<string, unknown>) {
+      whenReady(() => recordError(error, attributes, 'custom'));
+    },
 
-  /** Records a custom event with properties. */
-  trackEvent(name: string, properties?: Record<string, unknown>) {
-    whenReady(() => actions.trackEvent(name, properties));
-  },
+    /** Records a custom event with properties. */
+    trackEvent(name: string, properties?: Record<string, unknown>) {
+      whenReady(() => actions.trackEvent(name, properties));
+    },
 
-  /** Records the time since the current view started, under a name. */
-  addTiming(name: string) {
-    const at = Date.now();
-    whenReady(() => {
-      const elapsed = views.viewElapsedMs();
-      if (elapsed < 0 || !name) return;
-      actions.trackEvent(`timing:${name}`, { value_ms: elapsed - (Date.now() - at) });
-    });
-  },
+    /** Records the time since the current view started, under a name. */
+    addTiming(name: string) {
+      const at = Date.now();
+      whenReady(() => {
+        const elapsed = views.viewElapsedMs();
+        if (elapsed < 0 || !name) return;
+        actions.trackEvent(`timing:${name}`, { value_ms: elapsed - (Date.now() - at) });
+      });
+    },
 
-  /** Marks the current view as loaded (`view_loading_time_ms`). */
-  reportViewLoaded(overwrite = false) {
-    whenReady(() => views.reportViewLoaded(overwrite));
-  },
+    /** Marks the current view as loaded (`view_loading_time_ms`). */
+    reportViewLoaded(overwrite = false) {
+      whenReady(() => views.reportViewLoaded(overwrite));
+    },
 
-  /** Marks the app as fully displayed after a cold start (`app_ttfd_ms`). */
-  reportAppFullyDisplayed() {
-    whenReady(() => views.reportAppFullyDisplayed());
-  },
+    /** Marks the app as fully displayed after a cold start (`app_ttfd_ms`). */
+    reportAppFullyDisplayed() {
+      whenReady(() => views.reportAppFullyDisplayed());
+    },
 
-  /** Identifies the user. Keys other than id, name and email go out as `usr.<key>` tags. */
-  setUser(user: UserInfo) {
-    if (!user || !user.id) {
-      logger.warn('setUser() needs an id');
-      return;
-    }
-    putUser(user);
-    if (initialized) saveLastContext();
-  },
+    /** Identifies the user. Keys other than id, name and email go out as `usr.<key>` tags. */
+    setUser(user: UserInfo) {
+      if (!user || !user.id) {
+        logger.warn('setUser() needs an id');
+        return;
+      }
+      putUser(user);
+      if (initialized) saveLastContext();
+    },
 
-  clearUser() {
-    dropUser();
-    if (initialized) saveLastContext();
-  },
+    clearUser() {
+      dropUser();
+      if (initialized) saveLastContext();
+    },
 
-  /** Adds or replaces tags on every later event. */
-  setTags(tags: Record<string, TagValue>) {
-    putTags(tags);
-  },
+    /** Adds or replaces tags on every later event. */
+    setTags(tags: Record<string, TagValue>) {
+      putTags(tags);
+    },
 
-  removeTag(key: string) {
-    dropTag(key);
-  },
+    removeTag(key: string) {
+      dropTag(key);
+    },
 
-  addFeatureFlag(name: string, value: unknown) {
-    addFlag(name, value);
-  },
+    addFeatureFlag(name: string, value: unknown) {
+      addFlag(name, value);
+    },
 
-  /**
-   * `pending` holds events on the device; `granted` sends them;
-   * `not-granted` deletes them and stops collection and replay.
-   */
-  setTrackingConsent(consent: TrackingConsent) {
-    if (consent !== 'granted' && consent !== 'pending' && consent !== 'not-granted') return;
-    setConsentState(consent);
-  },
+    /**
+     * `pending` holds events on the device; `granted` sends them;
+     * `not-granted` deletes them and stops collection and replay.
+     */
+    setTrackingConsent(consent: TrackingConsent) {
+      if (consent !== 'granted' && consent !== 'pending' && consent !== 'not-granted') return;
+      setConsentState(consent);
+    },
 
-  getTrackingConsent(): TrackingConsent {
-    return getConsent();
-  },
+    getTrackingConsent(): TrackingConsent {
+      return getConsent();
+    },
 
-  /** Ends the session. The next view or event starts a new one. */
-  stopSession() {
-    whenReady(() => {
-      views.stopView();
+    /** Ends the session. The next view or event starts a new one. */
+    stopSession() {
+      whenReady(() => {
+        views.stopView();
+        flushReplay();
+        endSession();
+      });
+    },
+
+    /** The current session id, or an empty string when there is none. */
+    getSessionId(): string {
+      if (!initialized || !getConfig()) return '';
+      const s = peekSession();
+      return s && !isSessionExpired() && s.sampled ? s.id : '';
+    },
+
+    startOperation(name: string, key?: string) {
+      whenReady(() => actions.startOperation(name, key));
+    },
+
+    succeedOperation(name: string, key?: string, attributes?: Record<string, unknown>) {
+      whenReady(() => actions.succeedOperation(name, key, attributes));
+    },
+
+    failOperation(name: string, key?: string, reason?: string, attributes?: Record<string, unknown>) {
+      whenReady(() => actions.failOperation(name, key, reason, attributes));
+    },
+
+    /** Sends everything queued now. */
+    flush() {
+      if (!initialized) return;
+      drainNativeEvents();
+      views.flushActiveView();
       flushReplay();
-      endSession();
-    });
+      flushTransport();
+    },
   },
-
-  /** The current session id, or an empty string when there is none. */
-  getSessionId(): string {
-    if (!initialized || !getConfig()) return '';
-    const s = peekSession();
-    return s && !isSessionExpired() && s.sampled ? s.id : '';
-  },
-
-  startOperation(name: string, key?: string) {
-    whenReady(() => actions.startOperation(name, key));
-  },
-
-  succeedOperation(name: string, key?: string, attributes?: Record<string, unknown>) {
-    whenReady(() => actions.succeedOperation(name, key, attributes));
-  },
-
-  failOperation(name: string, key?: string, reason?: string, attributes?: Record<string, unknown>) {
-    whenReady(() => actions.failOperation(name, key, reason, attributes));
-  },
-
-  /** Sends everything queued now. */
-  flush() {
-    if (!initialized) return;
-    drainNativeEvents();
-    views.flushActiveView();
-    flushReplay();
-    flushTransport();
-  },
-};
+  { init: false, isInitialized: false, getTrackingConsent: 'granted', getSessionId: '' },
+);
 
 /** Test hook: forget init() so a test can start again. */
 export function __resetForTests() {

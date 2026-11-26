@@ -11,6 +11,7 @@
 
 import { isoTime } from '../core/clock';
 import { emit, setErrorObserver, type EventData } from './emit';
+import { guard, safeTimeout } from '../core/guard';
 
 /** How long a tap stays open. The reference SDK waits 100 ms for errors. */
 export const ERROR_TAP_WINDOW_MS = 100;
@@ -54,7 +55,7 @@ export function holdTap(data: EventData, at: number) {
     data: { ...data, timestamp: isoTime(at) },
     at,
     errors: recentErrors.filter((t) => inWindow(at, t)).length,
-    timer: setTimeout(releaseTap, Math.max(0, at + ERROR_TAP_WINDOW_MS - Date.now())),
+    timer: safeTimeout(releaseTap, Math.max(0, at + ERROR_TAP_WINDOW_MS - Date.now())),
   };
 }
 
@@ -87,7 +88,8 @@ function onError(data: EventData) {
   if (data.error_is_crash === 1) releaseTap();
 }
 
-setErrorObserver(onError);
+// At module load, outside any call of the app: a failure must not stop the import.
+guard(() => setErrorObserver(onError));
 
 /** Test hook. */
 export function resetHeldTap() {
