@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { parseReferenceReplay, parseReferenceRum, parseEnvelope, parseMultipart } from '../scripts/intake.mjs';
 // @ts-expect-error: a plain JS module of the CI scripts.
 import { fromReference, lastViewUpdates } from '../scripts/compare/lib.mjs';
+import { jsThreadNodes, report as jsThreadReport, summarize } from '../scripts/compare/js-thread-profile.mjs';
 
 const ROOT = path.resolve(__dirname, '..');
 const API = 'http://10.0.2.2:4319/api';
@@ -176,6 +177,32 @@ async function startCollector(out: string) {
       await new Promise((resolve) => setTimeout(resolve, readyAfterMs));
       return fetch(`${base}/fixture/ready?name=${encodeURIComponent(name)}`).then((r) => r.status);
     },
+    /** Client spans with these ids, on a session, as the SDK sends them to /v1/rum/traces. */
+    traceSpans: (list: Array<{ traceId: string; spanId: string; session: string; url?: string }>, batchId = `t-${Math.random()}`) =>
+      post(
+        '/v1/rum/traces',
+        JSON.stringify({
+          resourceSpans: [
+            {
+              resource: { attributes: [] },
+              scopeSpans: [
+                {
+                  spans: list.map((x) => ({
+                    traceId: x.traceId,
+                    spanId: x.spanId,
+                    name: 'GET',
+                    attributes: [
+                      { key: 'url.full', value: { stringValue: x.url ?? `${API}/soak/3` } },
+                      { key: 'session.id', value: { stringValue: x.session } },
+                    ],
+                  })),
+                },
+              ],
+            },
+          ],
+        }),
+        { 'content-type': 'application/json', 'x-api-key': 'k', 'x-oodle-instance': 'i', 'x-oodle-batch-id': batchId },
+      ),
     /** A body of client spans (OTLP/JSON), as the SDK sends to /v1/rum/traces. */
     spans: (count: number) =>
       post(
@@ -215,11 +242,11 @@ type Step = { kind: 'action' | 'error' | 'request'; name: string };
  * that it reported for the forced block (0: none), and `openViewMs` the
  * time of a last view that is still open (undefined: no such view).
  */
-type LaunchEnd = { longTaskMs?: number; openViewMs?: number };
+type LaunchEnd = { longTaskMs?: number; openViewMs?: number; taps?: string[] };
 
 /** One launch of a soak walk, as each SDK reports it. */
 function oodleLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
-  const { longTaskMs = 380, openViewMs } = end;
+  const { longTaskMs = 380, openViewMs, taps = [] } = end;
   let n = 0;
   const base = (viewId = `${session}-v`) => ({ log_record_uid: `${session}-${n++}`, session_id: session, view_id: viewId, app_screen_name: 'Home', timestamp: new Date(t0 + n * 100).toISOString() });
   const view = (seq: number, active: boolean) => ({ ...base(), event_type: 'view', view_update_seq: seq, view_is_new: seq === 1 ? 1 : 0, view_is_active: active ? 1 : 0, view_time_spent_ms: seq * 2000 });
@@ -229,6 +256,8 @@ function oodleLaunch(launch: string, session: string, steps: Step[], t0: number,
     if (s.kind === 'error') events.push({ ...base(), event_type: 'error', error_source: 'custom', error_is_crash: 0, exception_message: s.name });
     if (s.kind === 'request') events.push({ ...base(), event_type: 'resource', url_full: `${API}/${s.name}` });
   }
+  // Oodle names a tap after the element and its label.
+  for (const t of taps) events.push({ ...base(), event_type: 'action', action_type: 'tap', action_name: `Pressable ("${t}")` });
   events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:long-task:${launch}` });
   if (longTaskMs) events.push({ ...base(), event_type: 'long_task', long_task_duration_ms: longTaskMs });
   events.push({ ...base(), event_type: 'action', action_type: 'custom', action_name: `soak:done:${launch}` }, view(2, false));
@@ -239,7 +268,7 @@ function oodleLaunch(launch: string, session: string, steps: Step[], t0: number,
 }
 
 function referenceLaunch(launch: string, session: string, steps: Step[], t0: number, end: LaunchEnd = {}) {
-  const { longTaskMs = 400, openViewMs } = end;
+  const { longTaskMs = 400, openViewMs, taps = [] } = end;
   let n = 0;
   const base = () => ({ date: t0 + ++n * 100, session: { id: session }, view: { id: `${session}-v`, name: 'Home' } });
   const view = (version: number, active: boolean) => ({ ...base(), type: 'view', _dd: { document_version: version }, view: { id: `${session}-v`, name: 'Home', is_active: active, time_spent: version * 2e9 } });
@@ -250,6 +279,7 @@ function referenceLaunch(launch: string, session: string, steps: Step[], t0: num
     if (s.kind === 'error') events.push({ ...base(), type: 'error', error: { id: `${session}-e${n}`, source: 'custom', is_crash: false, message: s.name } });
     if (s.kind === 'request') events.push({ ...base(), type: 'resource', resource: { id: `${session}-r${n}`, url: `${API}/${s.name}?seed=1` } });
   }
+  for (const t of taps) events.push({ ...base(), type: 'action', action: { id: `${session}-t${n}`, type: 'tap', target: { name: `Pressable ("${t}")` } } });
   events.push(action(`soak:long-task:${launch}`));
   // The reference SDK sends durations in nanoseconds.
   if (longTaskMs) events.push({ ...base(), type: 'long_task', long_task: { id: `${session}-l${n}`, duration: longTaskMs * 1e6 } });
@@ -271,8 +301,8 @@ function run(script: string, out: string, ...args: string[]) {
   return spawnSync(process.execPath, [path.join(ROOT, 'scripts/compare', script), '--out', out, '--platform', 'android', ...args], { encoding: 'utf8', env });
 }
 
-const launchRow = (provider: string, round: number, launch: number, cpu: number) =>
-  JSON.stringify({ platform: 'android', provider, replay: 'on', settings: 'shipped', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, threads: { main: cpu / 4, js: cpu / 2 }, mem_kb: 100_000, frames: null });
+const launchRow = (provider: string, round: number, launch: number, cpu: number | null, extra: object = {}) =>
+  JSON.stringify({ platform: 'android', provider, replay: 'on', settings: 'shipped', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, threads: cpu === null ? null : { main: cpu / 4, js: cpu / 2 }, mem_kb: 100_000, frames: null, ...extra });
 
 describe('comparison scripts', () => {
   const tmp = () => {
@@ -360,17 +390,27 @@ describe('comparison scripts', () => {
   // SDK is wrong when they differ.
   const TRACE = '0af7651916cd43dd8448eb211c80319c';
   const OODLE_TP = `00-${TRACE}-b7ad6b7169203331-01`;
-  async function apiRun(traceparents: string[], referenceSteps: Step[]) {
+  /**
+   * A launch with one request to the API. By default Oodle records the
+   * trace of the first traceparent on its resource and sends a client span
+   * with its ids, on the session of the launch.
+   */
+  type ApiRunOptions = { trace?: string; spans?: Array<{ traceId: string; spanId: string; session: string; url?: string }> };
+  async function apiRun(traceparents: string[], referenceSteps: Step[], opts: ApiRunOptions = {}) {
     const out = tmp();
     const c = await startCollector(out);
     const launch = 'soak-both-on-r1-1';
     await c.scenario({ name: launch, provider: 'both' });
     expect(await c.api('soak/3', traceparents)).toBe(200);
     const t0 = Date.now() - 5000;
+    const [, first, firstSpan] = traceparents[0]?.split('-') ?? [];
+    const trace = 'trace' in opts ? opts.trace : (first ?? TRACE);
     const oodle = oodleLaunch(launch, 'oo-1', STEPS, t0).map((e) =>
-      (e as { event_type?: string }).event_type === 'resource' ? { ...e, trace_id: TRACE } : e,
+      (e as { event_type?: string }).event_type === 'resource' && trace ? { ...e, trace_id: trace } : e,
     );
     await c.oodle(oodle, [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 2 }] }]);
+    const spans = opts.spans ?? (first ? [{ traceId: first, spanId: firstSpan, session: 'oo-1' }] : []);
+    if (spans.length) expect(await c.traceSpans(spans)).toBe(200);
     await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0));
     await c.referenceReplay('ref-1');
     fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900) + '\n');
@@ -397,10 +437,62 @@ describe('comparison scripts', () => {
   });
 
   it('fails when Oodle records a trace that did not reach the API', async () => {
-    const out = await apiRun(['00-11111111111111111111111111111111-2222222222222222-01'], STEPS);
+    const out = await apiRun(['00-11111111111111111111111111111111-2222222222222222-01'], STEPS, { trace: TRACE });
     const r = run('parity.mjs', out, '--replay', 'on');
     expect(r.stdout).toMatch(/FAIL trace-link: differs in 1 of 1/);
     expect(r.status).toBe(1);
+  });
+
+  // Before traced-requests, trace-link passed with "0 of 0" when Oodle
+  // recorded no trace at all.
+  it('fails when Oodle records no trace for a request with a sampled traceparent', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { trace: undefined });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/ok {3}trace-link: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/FAIL traced-requests: differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  it('needs no trace and no span for a request that is not sampled', async () => {
+    const out = await apiRun([`00-${TRACE}-b7ad6b7169203331-00`], STEPS, { trace: undefined, spans: [] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/ok {3}traced-requests: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/ok {3}client-spans: differs in 0 of 1/);
+    expect(r.status).toBe(0);
+  });
+
+  it('fails when a traced request has no Oodle client span', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL client-spans: differs in 1 of 1 \(.*`0 of 1`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('fails when the client span is on another session', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [{ traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'other' }] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL client-spans: differs in 1 of 1 \(.*`0 of 1, 1 on another session`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('fails on a client span with ids that did not reach the API', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, {
+      spans: [
+        { traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'oo-1' },
+        { traceId: TRACE, spanId: '1111111111111111', session: 'oo-1' },
+      ],
+    });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL span-ids: differs in 1 of 1 \(.*`1 of 2`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('reports, and does not fail on, a client span that was sent again', async () => {
+    const span = { traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'oo-1' };
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [span, span] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/diff spans-sent-again: differs in 1 of 1/);
+    expect(r.status).toBe(0);
   });
 
   it('compares time spent on closed views only', async () => {
@@ -481,5 +573,195 @@ describe('comparison scripts', () => {
     expect(r.stdout).toContain('1200 (+200)');
     expect(r.stdout).toContain('SDK settings: shipped');
     expect(by('reference')).toMatchObject({ span_requests: 0, spans_kb: 0 });
+  });
+  it('gives the noise of the baseline, the order of each round, and launches without a measure', async () => {
+    const out = tmp();
+    const rows: string[] = [];
+    // Two rounds, in the turned order of cost.sh. The baseline is 1000 ms
+    // in round 1 and 1100 ms in round 2; one Oodle launch has no CPU time.
+    const order = [
+      ['none', 'oodle', 'reference'],
+      ['oodle', 'reference', 'none'],
+    ];
+    for (const [i, providers] of order.entries()) {
+      const round = i + 1;
+      for (const provider of providers) {
+        for (const launch of [1, 2]) {
+          const cpu = provider === 'none' ? 900 + round * 100 : provider === 'oodle' && round === 2 && launch === 2 ? null : 1300;
+          rows.push(launchRow(provider, round, launch, cpu));
+        }
+      }
+    }
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('cost.mjs', out);
+    expect(r.status).toBe(0);
+    const { rows: cost } = JSON.parse(fs.readFileSync(path.join(out, 'cost.json'), 'utf8'));
+    const by = (p: string) => cost.find((x: { provider: string }) => x.provider === p);
+    expect(by('none').cpu_ms_range).toEqual({ min: 1000, max: 1100 });
+    expect(by('oodle').missing).toEqual({ cpu_ms: 1, mem_kb: 0 });
+    // Each round against its own baseline: +300 and +200 (the lower middle value of two).
+    expect(by('oodle').cpu_ms_delta).toEqual({ median: 200, min: 200, max: 300 });
+    const md = fs.readFileSync(path.join(out, 'cost.md'), 'utf8');
+    expect(md).toContain('| on | none (baseline) | 4 | 1000 (1000…1100) |');
+    expect(md).toContain('Order of the SDKs in each round: 1: none, oodle, reference; 2: oodle, reference, none.');
+    expect(md).toContain('**oodle, replay on: launches without a measure** (cpu_ms 1 of 4)');
+  });
+
+  // The date of a reference SDK view update is the start of the view. With
+  // the date only, its lag held the time on the screen.
+  it('gives the lag of a reference view update from the time of the update', async () => {
+    const out = tmp();
+    const c = await startCollector(out);
+    const start = Date.now() - 30_000;
+    const view = (version: number, spentMs: number) => ({
+      date: start,
+      type: 'view',
+      session: { id: 'ref-1' },
+      view: { id: 'v1', name: 'Home', is_active: true, time_spent: spentMs * 1e6 },
+      _dd: { document_version: version },
+    });
+    expect(await c.reference([view(1, 1000), view(2, 29_000)])).toBe(202);
+    const [req] = fs.readFileSync(path.join(out, 'requests.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const [first, last] = req.lags_ms;
+    expect(first).toBeGreaterThanOrEqual(29_000);
+    expect(last).toBeLessThan(5000);
+  });
+
+  it('shows the order of the SDKs of the launches that differ', async () => {
+    const out = tmp();
+    const c = await startCollector(out);
+    const rows: string[] = [];
+    for (const [i, order] of (['oodle-first', 'reference-first'] as const).entries()) {
+      const launch = `soak-both-off-r1-${i + 1}`;
+      const t0 = Date.now() - 5000 + i * 1000;
+      await c.scenario({ name: launch, provider: 'both', order });
+      await c.oodle(oodleLaunch(launch, `oo-${i}`, STEPS, t0));
+      // The reference SDK loses an action when it starts first.
+      const steps = order === 'reference-first' ? STEPS.filter((st) => st.kind !== 'action') : STEPS;
+      await c.reference(referenceLaunch(launch, `ref-${i}`, steps, t0));
+      rows.push(launchRow('both', 1, i + 1, 900, { order, name: launch }));
+    }
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.status).toBe(1);
+    const md = fs.readFileSync(path.join(out, 'parity.md'), 'utf8');
+    expect(md).toContain('(android, replay off, 2 launches: oodle-first, reference-first)');
+    expect(md).toMatch(/\| custom-actions \| must \| \*\*FAIL\*\* \| 1 of 2 \(reference-first\) \| soak-both-off-r1-2 \(reference-first\): /);
+  });
+  // CI taps the app with a real touch and records its taps (soak.sh TAPS),
+  // as the stand-in API records the requests.
+  async function tapRun(oodleTaps: string[], referenceTaps: string[], ciTaps = ['Orders', 'Home'], missed: string[] = []) {
+    const out = tmp();
+    const c = await startCollector(out);
+    const launch = 'soak-both-off-r1-1';
+    const t0 = Date.now() - 5000;
+    await c.scenario({ name: launch, provider: 'both' });
+    await c.oodle(oodleLaunch(launch, 'oo-1', STEPS, t0, { taps: oodleTaps }));
+    await c.reference(referenceLaunch(launch, 'ref-1', STEPS, t0, { taps: referenceTaps }));
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900, { name: launch, order: 'oodle-first', fetch: 'native', taps: ciTaps, taps_missed: missed }) + '\n');
+    return out;
+  }
+
+  it('passes when Oodle reports each tap that CI made, with its label', async () => {
+    const out = await tapRun(['Home', 'Orders'], ['Orders', 'Home']);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/ok {3}taps: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/ok {3}taps \(reference\): differs in 0 of 1/);
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(out, 'parity.md'), 'utf8')).toContain('1 launches: oodle-first + native fetch; 2 taps by CI)');
+  });
+
+  it('fails when Oodle lost a tap, and reports a tap that the reference SDK lost', async () => {
+    const out = await tapRun(['Orders'], []);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/FAIL taps: differs in 1 of 1 \(soak-both-off-r1-1 \(oodle-first \+ native fetch\): Oodle `Orders` \/ CI taps `Home, Orders`\)/);
+    expect(r.stdout).toMatch(/diff taps \(reference\): differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  // Without a working tap tool CI makes no taps. That must fail, not pass
+  // as a run with nothing to check.
+  it('fails when CI could not make a tap', async () => {
+    const out = await tapRun(['Home'], ['Home'], ['Home'], ['Orders']);
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.stdout).toMatch(/ok {3}taps: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/FAIL taps-made: differs in 1 of 1 \(all: taps that CI made `1 of 2` \/ not made `Orders`\)/);
+    expect(r.status).toBe(1);
+  });
+  // On Android the first start after soak.sh clears the app data is at
+  // times some 450 ms faster to ready, with any SDK or none. The mean of a
+  // round moved by about 90 ms for it.
+  it('takes the median start time of a round, and reports when the frames reset ran', async () => {
+    const out = tmp();
+    const t0 = 1_800_000_000_000;
+    const toReady = [515, 505, 45, 510, 512];
+    const fixture: string[] = [];
+    const rows: string[] = [];
+    for (const [i, ms] of toReady.entries()) {
+      const name = `soak-none-on-r1-${i + 1}`;
+      const set = t0 + i * 60_000;
+      fixture.push(
+        JSON.stringify({ received_ms: set, kind: 'set', scenario: name }),
+        JSON.stringify({ received_ms: set + 300, kind: 'read', scenario: name }),
+        JSON.stringify({ received_ms: set + 300 + ms, kind: 'ready', scenario: name }),
+      );
+      // The reset runs during the start of the app, but not in the fast launch.
+      const reset = ms < 100 ? [set + 900, set + 950] : [set + 250, set + 700];
+      rows.push(launchRow('none', 1, i + 1, 1000, { frames_reset_ms: reset }));
+    }
+    fs.writeFileSync(path.join(out, 'fixture.ndjson'), fixture.join('\n') + '\n');
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('cost.mjs', out);
+    expect(r.status).toBe(0);
+    const { rows: cost, frames_reset: reset } = JSON.parse(fs.readFileSync(path.join(out, 'cost.json'), 'utf8'));
+    // The median, 510 ms; the mean would be 417 ms.
+    expect(cost[0].js_to_ready_ms).toBe(510);
+    expect(reset).toMatchObject({ launches: 5, during_start: 4, js_to_ready_ms_during: 510, js_to_ready_ms_outside: 45 });
+    expect(fs.readFileSync(path.join(out, 'cost.md'), 'utf8')).toContain(
+      'It ran during the start of the app in 4 launches: JS to ready 510 ms there, 45 ms in the others.',
+    );
+  });
+});
+
+describe('js-thread-profile.mjs', () => {
+  // The shape of macOS `sample`: a call tree per thread, two characters a level.
+  const sample = (storageSamples: number) =>
+    [
+      'Call graph:',
+      '    100 Thread_1   DispatchQueue_1: com.apple.main-thread  (serial)',
+      '    + 100 start  (in dyld) + 1  [0x1]',
+      '    100 Thread_2: com.facebook.react.runtime.JavaScript',
+      '    + 100 thread_start  (in libsystem_pthread.dylib) + 8  [0x2]',
+      '    +   100 +[RCTJSThreadManager runRunLoop]  (in OodleExample) + 212  [0x3]',
+      '    +     60 __CFRunLoopServiceMachPort  (in CoreFoundation) + 156  [0x4]',
+      '    +     40 hermes::vm::Interpreter::interpretFunction  (in hermes) + 1  [0x5]',
+      `    +       ${storageSamples} -[OodleRum storageSet:value:]  (in OodleExample) + 1  [0x6]`,
+      `    +         ${storageSamples} hermes::vm::Interpreter::interpretFunction  (in hermes) + 1  [0x5]`,
+      '    100 Thread_3: hades',
+      '    + 100 -[OodleRum storageSet:value:]  (in OodleExample) + 1  [0x6]',
+      '',
+    ].join('\n');
+
+  it('reads only the JS thread and counts a frame once on a path', () => {
+    const s = summarize(jsThreadNodes(sample(30))!);
+    expect(s.total).toBe(100);
+    expect(s.busy).toBe(40);
+    expect(s.frames.get('-[OodleRum storageSet:value:] (OodleExample)')).toBe(30);
+    expect(s.frames.get('hermes::vm::Interpreter::interpretFunction (hermes)')).toBe(40);
+  });
+
+  it('reports the share of each app frame in the busy samples, each launch with the same weight', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'js-thread-'));
+    // 30 of 40 busy samples, and 10 of 40: a mean share of 50%.
+    fs.writeFileSync(path.join(dir, 'soak-oodle-off-rprofile-1.txt'), sample(30));
+    fs.writeFileSync(path.join(dir, 'soak-oodle-off-rprofile-2.txt'), sample(10));
+    fs.writeFileSync(path.join(dir, 'soak-none-off-rprofile-1.txt'), sample(0));
+    const md = jsThreadReport(dir);
+    expect(md).toContain('**oodle** (2 launches)');
+    expect(md).toContain('| 50.0% | `-[OodleRum storageSet:value:]` |');
+    expect(md).toMatch(/\*\*none\*\* \(1 launches\)[^*]*None\./);
+    // The run loop frame holds every sample of the thread: not listed.
+    expect(md).not.toContain('RCTJSThreadManager');
+    expect(jsThreadReport(path.join(dir, 'none'))).toContain('No sample of the JS thread.');
   });
 });

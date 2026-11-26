@@ -7,8 +7,11 @@
 // "scenario:<launch name>". The requests of the app are checked against
 // what the stand-in app API got (api-requests.ndjson), so a difference
 // shows which SDK is wrong: Oodle must match the API, and a request that
-// The reference SDK lost is reported. Each request must also carry at most one
+// the reference SDK lost is reported. Each request must also carry at most one
 // traceparent, and the trace that Oodle records must be one the API got.
+// Each request that reached the API with a sampled traceparent must have
+// the trace on Oodle's resource and an Oodle client span with the same
+// ids, on the session of the launch (spans.ndjson).
 // Checks:
 //   must  a difference fails the run, unless parity-allowlist.json lists it
 //   info  a difference is reported; with --strict it fails as a must check
@@ -23,7 +26,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { flag, opt, outDir } from '../ci/collector-lib.mjs';
-import { groupBy, lastViewUpdates, median, readApiRequests, readEvents, readLaunches, readReplay, tally, writeReport } from './lib.mjs';
+import {
+  groupBy,
+  lastViewUpdates,
+  median,
+  parseTraceparent,
+  readApiRequests,
+  readEvents,
+  readLaunches,
+  readReplay,
+  readSpans,
+  tally,
+  writeReport,
+} from './lib.mjs';
 
 const out = outDir();
 const platform = opt('platform', 'android');
@@ -58,9 +73,22 @@ const replayBySession = Object.fromEntries(SDKS.map((sdk) => [sdk, groupBy(repla
 
 // The launches of PROVIDER=both runs. Without launches.ndjson, the
 // launches are the soak scenario actions that either SDK sent.
-const launches = readLaunches(out)
-  .filter((l) => l.provider === 'both')
-  .map((l) => l.name);
+const bothLaunches = readLaunches(out).filter((l) => l.provider === 'both');
+const launches = bothLaunches.map((l) => l.name);
+// How each launch ran: which SDK started first (soak.sh ORDER) and the
+// app's fetch (FETCH: React Native's on XHR, or native, as Expo's). A
+// difference in the launches of one kind only points at its path: the SDK
+// that starts second wraps the fetch, XHR and error handlers of the first,
+// and a native fetch is seen by the fetch wrappers only.
+const variantOf = new Map(
+  bothLaunches.filter((l) => l.order || l.fetch).map((l) => [l.name, [l.order, l.fetch && `${l.fetch} fetch`].filter(Boolean).join(' + ')]),
+);
+// The taps that CI made in each launch (soak.sh TAPS): what the app was
+// given, as the stand-in API is for requests.
+const tapsOf = new Map(bothLaunches.filter((l) => Array.isArray(l.taps)).map((l) => [l.name, l.taps]));
+const tapsMissed = bothLaunches.flatMap((l) => l.taps_missed ?? []);
+/** The label of an Oodle tap: its name is `Pressable ("Orders")`. */
+const tapLabel = (name) => /\("(.*)"\)$/.exec(String(name))?.[1] ?? String(name);
 if (!launches.length) {
   const names = new Set();
   for (const sdk of SDKS) {
@@ -87,6 +115,11 @@ const apiByLaunch = groupBy(apiRequests, (r) => r.scenario);
 const haveApiLog = apiRequests.length > 0;
 
 const isApiRequest = (e) => e.type === 'resource' && /:4319\//.test(String(e.url));
+
+// Oodle's client spans, by their ids (trace id and span id).
+const spans = readSpans(out);
+const spanKey = (traceId, spanId) => `${traceId}-${spanId}`;
+const spansById = groupBy(spans, (s) => spanKey(s.traceId, s.spanId));
 const path0 = (url) => String(url).replace(/^[a-z]+:\/\/[^/]+/, '').replace(/\?.*$/, '');
 
 for (const launch of launches) {
@@ -133,8 +166,49 @@ for (const launch of launches) {
       'Oodle traces that reached the API',
       'expected',
     ]);
+    // The other way: each request with a sampled traceparent has its
+    // trace on Oodle's resource. Without this check, trace-link passed
+    // with "0 of 0" when Oodle recorded no trace at all. Oodle records the
+    // trace of a traceparent that is already in the call too, so the
+    // reference SDK's headers count.
+    const sampled = sent.flatMap((r) => r.traceparents.map(parseTraceparent)).filter((t) => t?.sampled);
+    const oodleTraces = new Set(traced.map((e) => e.trace));
+    const recorded = sampled.filter((t) => oodleTraces.has(t.traceId)).length;
+    compare('traced-requests', 'must', launch, `${recorded} of ${sampled.length}`, `${sampled.length} of ${sampled.length}`, recorded === sampled.length, [
+      'sampled API traceparents that Oodle recorded',
+      'expected',
+    ]);
+    // Each of them has an Oodle client span with the ids of the header,
+    // so the backend's spans are its children, and with the session of
+    // the launch. A trace that the reference SDK started gets a span too:
+    // that SDK sends its span to its own backend.
+    let withSpan = 0;
+    let otherSession = 0;
+    for (const t of sampled) {
+      const found = spansById.get(spanKey(t.traceId, t.spanId)) ?? [];
+      if (found.some((s) => s.session === session.oodle)) withSpan++;
+      else if (found.length) otherSession++;
+    }
+    const spanText = `${withSpan} of ${sampled.length}${otherSession ? `, ${otherSession} on another session` : ''}`;
+    compare('client-spans', 'must', launch, spanText, `${sampled.length} of ${sampled.length}`, withSpan === sampled.length, [
+      'sampled API traceparents with an Oodle span on the session',
+      'expected',
+    ]);
   } else {
     compare('api-requests', 'must', launch, oodleApi, referenceApi);
+  }
+  if (tapsOf.has(launch)) {
+    // Each tap reached the app through its touch handling, so Oodle must
+    // report each, with the label of the element. The reference SDK (with
+    // its Babel plugin, scripts/ci/create-fixture.sh) is reported against
+    // the same taps, and does not fail the run. Both name a tap
+    // Pressable ("<label>").
+    const truth = tally(tapsOf.get(launch));
+    const [oodleTaps, referenceTaps] = per((ev, sdk) =>
+      tally(ev.filter((e) => e.type === 'action' && e.action_type === 'tap').map((e) => tapLabel(e.name))),
+    );
+    compare('taps', 'must', launch, oodleTaps, truth, oodleTaps === truth, ['Oodle', 'CI taps']);
+    compare('taps (reference)', 'info', launch, referenceTaps, truth, referenceTaps === truth, ['reference', 'CI taps']);
   }
   check('screens', 'must', (ev) => [...new Set(lastViewUpdates(ev).map((v) => v.screen))].sort().join(', '));
   check('views', 'info', (ev) => lastViewUpdates(ev).length);
@@ -194,6 +268,15 @@ for (const launch of launches) {
   compare('replay (reference)', 'must', launch, has(referenceReplay), expected, has(referenceReplay) === expected, ['reference', 'expected']);
 }
 
+// A tap that CI could not make (no tap tool, or no element with the
+// label): the run then checks fewer taps than it should.
+if (tapsOf.size) {
+  const made = [...tapsOf.values()].reduce((n, t) => n + t.length, 0);
+  compare('taps-made', 'must', 'all', `${made} of ${made + tapsMissed.length}`, tally(tapsMissed) || '–', tapsMissed.length === 0, [
+    'taps that CI made',
+    'not made',
+  ]);
+}
 // Over the whole run: an event that arrives twice counts twice.
 const dupes = Object.fromEntries(SDKS.map((sdk) => [sdk, events[sdk].length - new Set(events[sdk].map((e) => e.id)).size]));
 compare('no-duplicates', 'must', 'all', dupes.oodle, dupes.reference, dupes.oodle === 0 && dupes.reference === 0);
@@ -219,6 +302,20 @@ if (haveApiLog) {
     'requests with more than one traceparent',
     'first',
   ]);
+  // A span of a request to the API has the ids of a traceparent that the
+  // API got. Other ids are a span that no backend span joins.
+  const reached = new Set(apiRequests.flatMap((r) => r.traceparents.map(parseTraceparent)).filter(Boolean).map((t) => spanKey(t.traceId, t.spanId)));
+  const apiSpans = spans.filter((s) => /:4319\//.test(String(s.url)));
+  const stray = apiSpans.filter((s) => !reached.has(spanKey(s.traceId, s.spanId)));
+  compare('span-ids', 'must', 'all', `${stray.length} of ${apiSpans.length}`, '0', stray.length === 0, [
+    'Oodle spans with ids that did not reach the API',
+    'expected',
+  ]);
+  // The collector stores a trace body again when it comes again (only
+  // /v1/rum/ingest is stored once), so a span sent again is a duplicate
+  // in the backend. It is reported, and does not fail the run.
+  const again = [...spansById.values()].filter((list) => list.length > 1).length;
+  compare('spans-sent-again', 'info', 'all', again, 0, again === 0, ['Oodle spans stored more than once', 'expected']);
 }
 // The durations of the forced block (400 ms) are a measure, not a check:
 // the median, then the lowest and highest, in ms. They show how near each
@@ -232,8 +329,11 @@ if (replay === 'on') compare('replay-kb (decoded)', 'info', 'all', replayKb('ood
 // The report.
 const summary = [];
 let failed = 0;
+const variants = tally([...variantOf.values()]);
+const tapCount = [...tapsOf.values()].reduce((n, t) => n + t.length, 0);
+const runInfo = [variants, tapsOf.size ? `${tapCount} taps by CI` : ''].filter(Boolean).join('; ');
 const lines = [
-  `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches)`,
+  `## RUM parity: Oodle and the reference SDK (${platform}, replay ${replay}, ${launches.length} launches${runInfo ? `: ${runInfo}` : ''})`,
   '',
   '| Check | Level | Result | Differs in | Example (Oodle / reference, unless named) |',
   '|---|---|---|---|---|',
@@ -246,12 +346,15 @@ for (const [name, { level, labels, rows }] of results) {
   const result = differ.length === 0 ? 'same' : reason ? `allowed: ${reason}` : fails ? '**FAIL**' : 'differs';
   // The first difference, or for a measure, its values.
   const ex = differ[0] ?? (level === 'info' && rows.length === 1 ? rows[0] : undefined);
+  const where = ex && variantOf.has(ex.launch) ? `${ex.launch} (${variantOf.get(ex.launch)})` : ex?.launch;
   const example = !ex
     ? ''
     : labels
-      ? `${ex.launch}: ${labels[0]} \`${ex.oodle}\` / ${labels[1]} \`${ex.reference}\``
-      : `${ex.launch}: \`${ex.oodle}\` / \`${ex.reference}\``;
-  lines.push(`| ${name} | ${level} | ${result} | ${differ.length} of ${rows.length} | ${example.replace(/\|/g, '\\|')} |`);
+      ? `${where}: ${labels[0]} \`${ex.oodle}\` / ${labels[1]} \`${ex.reference}\``
+      : `${where}: \`${ex.oodle}\` / \`${ex.reference}\``;
+  // The launches that differ, by kind, when the launches had more than one.
+  const byOrder = new Set(variantOf.values()).size > 1 && differ.length ? ` (${tally(differ.map((r) => variantOf.get(r.launch) ?? 'unknown'))})` : '';
+  lines.push(`| ${name} | ${level} | ${result} | ${differ.length} of ${rows.length}${byOrder} | ${example.replace(/\|/g, '\\|')} |`);
   summary.push({ check: name, level, differ: differ.length, of: rows.length, result, examples: differ.slice(0, 5) });
   console.log(`${fails ? 'FAIL' : differ.length ? 'diff' : 'ok  '} ${name}: differs in ${differ.length} of ${rows.length}${ex ? ` (${example})` : ''}`);
 }

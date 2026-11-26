@@ -20,8 +20,8 @@ on:
         description: Launches with both SDKs, for parity
         default: '20'
       cost_rounds:
-        description: Rounds of no SDK, Oodle and the reference SDK, for cost
-        default: '3'
+        description: Rounds of no SDK, Oodle and the reference SDK, for cost (a multiple of 3, so each SDK runs first as often)
+        default: '6'
       cost_launches:
         description: Launches for each SDK in a round
         default: '5'
@@ -35,7 +35,7 @@ concurrency:
 
 env:
   PARITY_LAUNCHES: ${{ inputs.parity_launches || '20' }}
-  ROUNDS: ${{ inputs.cost_rounds || '3' }}
+  ROUNDS: ${{ inputs.cost_rounds || '6' }}
   LAUNCHES: ${{ inputs.cost_launches || '5' }}
 
 jobs:
@@ -179,6 +179,14 @@ jobs:
           xcrun simctl boot "$DEVICE"
           xcrun simctl bootstatus "$DEVICE" -b
           echo "SIMULATOR=$DEVICE" >> "$GITHUB_ENV"
+      # Real taps in the simulator (tap_label in scripts/ci/device.sh):
+      # simctl has no tap. parity.mjs fails when a tap was not made.
+      - name: Install AXe
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: '1'
+        run: |
+          brew install cameroncooke/axe/axe
+          command -v axe
       - name: Compare on the simulator
         run: bash scripts/compare/run.sh ios "$FIXTURE_DIR/ios/build/Build/Products/Release-iphonesimulator/OodleExample.app" "$RUNNER_TEMP/compare"
       - if: always()

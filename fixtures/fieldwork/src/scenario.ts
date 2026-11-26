@@ -17,9 +17,14 @@ export type Scenario = {
   debug?: boolean;
   /** The upload and log settings of both SDKs (config.ts). Default `ci`. */
   settings: SdkSettings;
+  /**
+   * The global fetch: React Native's own, on XHR (`xhr`, the default), or
+   * one that does not run on XHR, as Expo's (`native`, src/native-fetch.ts).
+   */
+  fetch: 'xhr' | 'native';
 };
 
-export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12, settings: 'ci' };
+export const NO_SCENARIO: Scenario = { name: 'none', order: 'oodle-first', replay: true, seed: 1, steps: 12, settings: 'ci', fetch: 'xhr' };
 
 const PROVIDERS: TelemetryProvider[] = ['none', 'oodle', 'reference', 'both'];
 const int = (value: unknown, fallback: number) =>
@@ -54,6 +59,7 @@ export async function fetchScenario(): Promise<Scenario> {
       steps: int(body.steps, NO_SCENARIO.steps),
       debug: body.debug === true,
       settings: body.settings === 'shipped' ? 'shipped' : 'ci',
+      fetch: body.fetch === 'native' ? 'native' : 'xhr',
     };
   } catch {
     return NO_SCENARIO;
