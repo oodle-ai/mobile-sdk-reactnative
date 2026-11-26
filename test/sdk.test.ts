@@ -36,7 +36,7 @@ const fakeNative = {
       processStartMs: Date.now() - 800,
     }),
   storageGet: (k: string) => store.get(k) ?? null,
-  storageSet: (k: string, v: string) => (store.set(k, v), true),
+  storageSet: vi.fn((k: string, v: string) => (store.set(k, v), true)),
   storageRemove: (k: string) => store.delete(k),
   storageSetAsync: vi.fn(async (k: string, v: string) => (store.set(k, v), true)),
   enableCrashReporting: () => true,
@@ -875,6 +875,7 @@ describe('OodleRum end to end', () => {
       () => new Promise((resolve) => held.push(() => resolve({ status: 202, rateLimits: null }))),
     );
     fakeNative.storageSetAsync.mockClear();
+    fakeNative.storageSet.mockClear();
     store.delete('outbox');
     rnStub.emitAppState('background');
     // No await: the outbox is on disk before any queued work runs.
@@ -882,10 +883,28 @@ describe('OodleRum end to end', () => {
     const bodies = (box.retry as Array<{ body: string }>).map((r) => r.body).join('\n');
     expect(bodies).toContain('"ios_app_state":"background"'.replace('ios', rnStub.Platform.OS));
     expect(fakeNative.storageSetAsync).not.toHaveBeenCalledWith('outbox', expect.anything());
+    // The session and the context too: the app can be ended at once.
+    const syncKeys = fakeNative.storageSet.mock.calls.map((c) => c[0]);
+    expect(syncKeys).toEqual(expect.arrayContaining(['session', 'last_context', 'outbox']));
     for (const answer of held) answer();
     transport.setPoster(collectorPoster);
     rnStub.emitAppState('active');
     await settle();
+  });
+
+  it('writes the session and the context of a new screen on a background thread', async () => {
+    fakeNative.storageSet.mockClear();
+    fakeNative.storageSetAsync.mockClear();
+    sdk.OodleRum.startView('async-write-key', 'AsyncWrite');
+    sdk.OodleRum.addAction('a tap on the new screen');
+    // The session write waits 1 s; settle moves the clock on 6 s.
+    await settle();
+    const asyncKeys = fakeNative.storageSetAsync.mock.calls.map((c) => c[0]);
+    expect(asyncKeys).toEqual(expect.arrayContaining(['last_context', 'session']));
+    const syncKeys = fakeNative.storageSet.mock.calls.map((c) => c[0]);
+    expect(syncKeys).not.toContain('last_context');
+    expect(syncKeys).not.toContain('session');
+    expect(JSON.parse(store.get('last_context') ?? '{}')).toMatchObject({ app_screen_name: 'AsyncWrite' });
   });
 
   it('writes the outbox on a background thread', async () => {

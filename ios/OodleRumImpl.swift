@@ -189,13 +189,49 @@ public final class OodleRumImpl: NSObject {
     return next
   }
 
+  /// Keys whose file is the only copy of data that is not sent yet
+  /// (`OUTBOX_KEY` in src/core/transport.ts). Their writes call fsync, so
+  /// the data stays after a power loss or a crash of the OS.
+  private static let durableKeys: Set<String> = ["outbox"]
+
+  /// Writes through a temporary file and a rename, so a process that ends
+  /// during a write leaves the last value, not part of the new one. An
+  /// atomic write of Foundation also calls fsync, which took most of the
+  /// time of a synchronous write on the JS thread. Only durable keys call
+  /// it: without it, a power loss can leave an empty file, which the JS
+  /// reads as no value. Android does the same, without fsync.
   private func write(_ key: String, _ value: String) -> Bool {
-    do {
-      try value.write(to: fileURL(key), atomically: true, encoding: .utf8)
-      return true
-    } catch {
-      return false
+    let target = fileURL(key)
+    if OodleRumImpl.durableKeys.contains(key) {
+      do {
+        try value.write(to: target, atomically: true, encoding: .utf8)
+        return true
+      } catch {
+        return false
+      }
     }
+    let tmp = target.path + ".tmp"
+    guard OodleRumImpl.writeFile(tmp, Array(value.utf8)) else { return false }
+    return rename(tmp, target.path) == 0
+  }
+
+  /// Writes the bytes with open, write and close only (no fsync).
+  static func writeFile(_ path: String, _ bytes: [UInt8]) -> Bool {
+    let fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+    if fd < 0 { return false }
+    var written = 0
+    let ok = bytes.withUnsafeBytes { buf -> Bool in
+      while written < buf.count {
+        let n = Darwin.write(fd, buf.baseAddress! + written, buf.count - written)
+        if n < 0 {
+          if errno == EINTR { continue }
+          return false
+        }
+        written += n
+      }
+      return true
+    }
+    return close(fd) == 0 && ok
   }
 
   @objc public func storageGet(_ key: String) -> String? {
