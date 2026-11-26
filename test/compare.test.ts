@@ -176,6 +176,32 @@ async function startCollector(out: string) {
       await new Promise((resolve) => setTimeout(resolve, readyAfterMs));
       return fetch(`${base}/fixture/ready?name=${encodeURIComponent(name)}`).then((r) => r.status);
     },
+    /** Client spans with these ids, on a session, as the SDK sends them to /v1/rum/traces. */
+    traceSpans: (list: Array<{ traceId: string; spanId: string; session: string; url?: string }>, batchId = `t-${Math.random()}`) =>
+      post(
+        '/v1/rum/traces',
+        JSON.stringify({
+          resourceSpans: [
+            {
+              resource: { attributes: [] },
+              scopeSpans: [
+                {
+                  spans: list.map((x) => ({
+                    traceId: x.traceId,
+                    spanId: x.spanId,
+                    name: 'GET',
+                    attributes: [
+                      { key: 'url.full', value: { stringValue: x.url ?? `${API}/soak/3` } },
+                      { key: 'session.id', value: { stringValue: x.session } },
+                    ],
+                  })),
+                },
+              ],
+            },
+          ],
+        }),
+        { 'content-type': 'application/json', 'x-api-key': 'k', 'x-oodle-instance': 'i', 'x-oodle-batch-id': batchId },
+      ),
     /** A body of client spans (OTLP/JSON), as the SDK sends to /v1/rum/traces. */
     spans: (count: number) =>
       post(
@@ -271,8 +297,8 @@ function run(script: string, out: string, ...args: string[]) {
   return spawnSync(process.execPath, [path.join(ROOT, 'scripts/compare', script), '--out', out, '--platform', 'android', ...args], { encoding: 'utf8', env });
 }
 
-const launchRow = (provider: string, round: number, launch: number, cpu: number) =>
-  JSON.stringify({ platform: 'android', provider, replay: 'on', settings: 'shipped', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, threads: { main: cpu / 4, js: cpu / 2 }, mem_kb: 100_000, frames: null });
+const launchRow = (provider: string, round: number, launch: number, cpu: number | null, extra: object = {}) =>
+  JSON.stringify({ platform: 'android', provider, replay: 'on', settings: 'shipped', round: String(round), launch, name: `soak-${provider}-on-r${round}-${launch}`, seed: 1, end: 'kill', start_ms: 500, cpu_ms: cpu, threads: cpu === null ? null : { main: cpu / 4, js: cpu / 2 }, mem_kb: 100_000, frames: null, ...extra });
 
 describe('comparison scripts', () => {
   const tmp = () => {
@@ -360,17 +386,27 @@ describe('comparison scripts', () => {
   // SDK is wrong when they differ.
   const TRACE = '0af7651916cd43dd8448eb211c80319c';
   const OODLE_TP = `00-${TRACE}-b7ad6b7169203331-01`;
-  async function apiRun(traceparents: string[], referenceSteps: Step[]) {
+  /**
+   * A launch with one request to the API. By default Oodle records the
+   * trace of the first traceparent on its resource and sends a client span
+   * with its ids, on the session of the launch.
+   */
+  type ApiRunOptions = { trace?: string; spans?: Array<{ traceId: string; spanId: string; session: string; url?: string }> };
+  async function apiRun(traceparents: string[], referenceSteps: Step[], opts: ApiRunOptions = {}) {
     const out = tmp();
     const c = await startCollector(out);
     const launch = 'soak-both-on-r1-1';
     await c.scenario({ name: launch, provider: 'both' });
     expect(await c.api('soak/3', traceparents)).toBe(200);
     const t0 = Date.now() - 5000;
+    const [, first, firstSpan] = traceparents[0]?.split('-') ?? [];
+    const trace = 'trace' in opts ? opts.trace : (first ?? TRACE);
     const oodle = oodleLaunch(launch, 'oo-1', STEPS, t0).map((e) =>
-      (e as { event_type?: string }).event_type === 'resource' ? { ...e, trace_id: TRACE } : e,
+      (e as { event_type?: string }).event_type === 'resource' && trace ? { ...e, trace_id: trace } : e,
     );
     await c.oodle(oodle, [{ session_id: 'oo-1', segment_index: 0, events: [{ type: 2 }] }]);
+    const spans = opts.spans ?? (first ? [{ traceId: first, spanId: firstSpan, session: 'oo-1' }] : []);
+    if (spans.length) expect(await c.traceSpans(spans)).toBe(200);
     await c.reference(referenceLaunch(launch, 'ref-1', referenceSteps, t0));
     await c.referenceReplay('ref-1');
     fs.writeFileSync(path.join(out, 'launches.ndjson'), launchRow('both', 1, 1, 900) + '\n');
@@ -397,10 +433,62 @@ describe('comparison scripts', () => {
   });
 
   it('fails when Oodle records a trace that did not reach the API', async () => {
-    const out = await apiRun(['00-11111111111111111111111111111111-2222222222222222-01'], STEPS);
+    const out = await apiRun(['00-11111111111111111111111111111111-2222222222222222-01'], STEPS, { trace: TRACE });
     const r = run('parity.mjs', out, '--replay', 'on');
     expect(r.stdout).toMatch(/FAIL trace-link: differs in 1 of 1/);
     expect(r.status).toBe(1);
+  });
+
+  // Before traced-requests, trace-link passed with "0 of 0" when Oodle
+  // recorded no trace at all.
+  it('fails when Oodle records no trace for a request with a sampled traceparent', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { trace: undefined });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/ok {3}trace-link: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/FAIL traced-requests: differs in 1 of 1/);
+    expect(r.status).toBe(1);
+  });
+
+  it('needs no trace and no span for a request that is not sampled', async () => {
+    const out = await apiRun([`00-${TRACE}-b7ad6b7169203331-00`], STEPS, { trace: undefined, spans: [] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/ok {3}traced-requests: differs in 0 of 1/);
+    expect(r.stdout).toMatch(/ok {3}client-spans: differs in 0 of 1/);
+    expect(r.status).toBe(0);
+  });
+
+  it('fails when a traced request has no Oodle client span', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL client-spans: differs in 1 of 1 \(.*`0 of 1`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('fails when the client span is on another session', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [{ traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'other' }] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL client-spans: differs in 1 of 1 \(.*`0 of 1, 1 on another session`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('fails on a client span with ids that did not reach the API', async () => {
+    const out = await apiRun([OODLE_TP], STEPS, {
+      spans: [
+        { traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'oo-1' },
+        { traceId: TRACE, spanId: '1111111111111111', session: 'oo-1' },
+      ],
+    });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/FAIL span-ids: differs in 1 of 1 \(.*`1 of 2`/);
+    expect(r.status).toBe(1);
+  });
+
+  it('reports, and does not fail on, a client span that was sent again', async () => {
+    const span = { traceId: TRACE, spanId: 'b7ad6b7169203331', session: 'oo-1' };
+    const out = await apiRun([OODLE_TP], STEPS, { spans: [span, span] });
+    const r = run('parity.mjs', out, '--replay', 'on');
+    expect(r.stdout).toMatch(/diff spans-sent-again: differs in 1 of 1/);
+    expect(r.status).toBe(0);
   });
 
   it('compares time spent on closed views only', async () => {
@@ -481,5 +569,79 @@ describe('comparison scripts', () => {
     expect(r.stdout).toContain('1200 (+200)');
     expect(r.stdout).toContain('SDK settings: shipped');
     expect(by('reference')).toMatchObject({ span_requests: 0, spans_kb: 0 });
+  });
+  it('gives the noise of the baseline, the order of each round, and launches without a measure', async () => {
+    const out = tmp();
+    const rows: string[] = [];
+    // Two rounds, in the turned order of cost.sh. The baseline is 1000 ms
+    // in round 1 and 1100 ms in round 2; one Oodle launch has no CPU time.
+    const order = [
+      ['none', 'oodle', 'reference'],
+      ['oodle', 'reference', 'none'],
+    ];
+    for (const [i, providers] of order.entries()) {
+      const round = i + 1;
+      for (const provider of providers) {
+        for (const launch of [1, 2]) {
+          const cpu = provider === 'none' ? 900 + round * 100 : provider === 'oodle' && round === 2 && launch === 2 ? null : 1300;
+          rows.push(launchRow(provider, round, launch, cpu));
+        }
+      }
+    }
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('cost.mjs', out);
+    expect(r.status).toBe(0);
+    const { rows: cost } = JSON.parse(fs.readFileSync(path.join(out, 'cost.json'), 'utf8'));
+    const by = (p: string) => cost.find((x: { provider: string }) => x.provider === p);
+    expect(by('none').cpu_ms_range).toEqual({ min: 1000, max: 1100 });
+    expect(by('oodle').missing).toEqual({ cpu_ms: 1, mem_kb: 0 });
+    // Each round against its own baseline: +300 and +200 (the lower middle value of two).
+    expect(by('oodle').cpu_ms_delta).toEqual({ median: 200, min: 200, max: 300 });
+    const md = fs.readFileSync(path.join(out, 'cost.md'), 'utf8');
+    expect(md).toContain('| on | none (baseline) | 4 | 1000 (1000…1100) |');
+    expect(md).toContain('Order of the SDKs in each round: 1: none, oodle, reference; 2: oodle, reference, none.');
+    expect(md).toContain('**oodle, replay on: launches without a measure** (cpu_ms 1 of 4)');
+  });
+
+  // The date of a reference SDK view update is the start of the view. With
+  // the date only, its lag held the time on the screen.
+  it('gives the lag of a reference view update from the time of the update', async () => {
+    const out = tmp();
+    const c = await startCollector(out);
+    const start = Date.now() - 30_000;
+    const view = (version: number, spentMs: number) => ({
+      date: start,
+      type: 'view',
+      session: { id: 'ref-1' },
+      view: { id: 'v1', name: 'Home', is_active: true, time_spent: spentMs * 1e6 },
+      _dd: { document_version: version },
+    });
+    expect(await c.reference([view(1, 1000), view(2, 29_000)])).toBe(202);
+    const [req] = fs.readFileSync(path.join(out, 'requests.ndjson'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+    const [first, last] = req.lags_ms;
+    expect(first).toBeGreaterThanOrEqual(29_000);
+    expect(last).toBeLessThan(5000);
+  });
+
+  it('shows the order of the SDKs of the launches that differ', async () => {
+    const out = tmp();
+    const c = await startCollector(out);
+    const rows: string[] = [];
+    for (const [i, order] of (['oodle-first', 'reference-first'] as const).entries()) {
+      const launch = `soak-both-off-r1-${i + 1}`;
+      const t0 = Date.now() - 5000 + i * 1000;
+      await c.scenario({ name: launch, provider: 'both', order });
+      await c.oodle(oodleLaunch(launch, `oo-${i}`, STEPS, t0));
+      // The reference SDK loses an action when it starts first.
+      const steps = order === 'reference-first' ? STEPS.filter((st) => st.kind !== 'action') : STEPS;
+      await c.reference(referenceLaunch(launch, `ref-${i}`, steps, t0));
+      rows.push(launchRow('both', 1, i + 1, 900, { order, name: launch }));
+    }
+    fs.writeFileSync(path.join(out, 'launches.ndjson'), rows.join('\n') + '\n');
+    const r = run('parity.mjs', out, '--replay', 'off');
+    expect(r.status).toBe(1);
+    const md = fs.readFileSync(path.join(out, 'parity.md'), 'utf8');
+    expect(md).toContain('(android, replay off, 2 launches: oodle-first, reference-first)');
+    expect(md).toMatch(/\| custom-actions \| must \| \*\*FAIL\*\* \| 1 of 2 \(reference-first\) \| soak-both-off-r1-2 \(reference-first\): /);
   });
 });

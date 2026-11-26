@@ -240,12 +240,24 @@ and replay, so one build serves every run.
   must report a long task for it (`forced-long-task`).
   `forced-long-task-ms` gives the durations that each SDK reported for it
   (median and range), to show how near they are to 400 ms.
+  The SDKs take turns to start first (`ORDER=alternate`): the SDK that
+  starts second wraps the fetch, XHR and error handlers of the first, and
+  an app can start either one first. The report gives the order of each
+  launch that differs.
+  Each request that reaches the stand-in API with a sampled `traceparent`
+  must have its trace on Oodle's resource (`traced-requests`) and an Oodle
+  client span with its ids on the session of the launch (`client-spans`).
 - Cost: no SDK, Oodle and the reference SDK in turn, on the same walks
   and device, with the settings that each SDK ships with
   (`SDK_SETTINGS=shipped`), not the fast uploads and debug log of the CI
   checks. `cost.mjs` reports CPU (all threads, the main thread, the JS
   thread), memory, start time, frames, bytes and requests, with the
   difference from the launches with no SDK in each round and its range.
+  The order of the SDKs turns each round, so no SDK always runs first on
+  a device that changes speed; the baseline row gives its own range over
+  the rounds, the noise to read the differences against. The lag of a
+  view update is from the time of the update: the reference SDK dates a
+  view at its start, so the collector adds its time spent.
   Every measure comes from outside the app (`scripts/ci/device.sh`; the
   time to ready is the time of the app's calls to the mock collector).
   CI emulators render in software, so measure frames and start time on a

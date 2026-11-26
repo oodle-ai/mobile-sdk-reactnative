@@ -46,7 +46,7 @@ if [ "$PLATFORM" = android ]; then
         }
         END { printf "{\"main\":%s,\"js\":%s}", m ? int(main) : "null", j ? int(js) : "null" }'
   }
-  # Memory of the app process, in KB (PSS).
+  # Memory of the app process, in KB (PSS). The package names the process.
   mem_kb() {
     adb shell dumpsys meminfo "$PKG" 2> /dev/null | tr -d '\r' |
       awk '/TOTAL PSS:/ { print $3; exit } /^ *TOTAL / { print $2; exit }'
@@ -101,7 +101,9 @@ else
       main = int(ms) }
       END { printf "{\"main\":%s,\"js\":null}", (NR >= 2 ? main : "null") }'
   }
-  mem_kb() { ps -o rss= -p "$(app_pid)" 2> /dev/null | tr -d ' '; }
+  # mem_kb [pid]: the resident memory of the process, in KB. The pid of
+  # the launch, so a process that started again is not measured.
+  mem_kb() { ps -o rss= -p "${1:-$(app_pid)}" 2> /dev/null | tr -d ' '; }
   # The simulator renders on the host GPU: its frames are not measured.
   frames_reset() { :; }
   frames_json() { printf 'null'; }

@@ -25,6 +25,12 @@
 #   SEED      seed of the first launch; launch n uses SEED+n (default 1)
 #   STEPS     steps of each walk (default 12)
 #   ROUND     a label for this run, in the scenario names (default 1)
+#   ORDER     oodle-first|reference-first|alternate: which SDK starts first
+#             with PROVIDER=both (default oodle-first). alternate starts
+#             Oodle first on odd launches and the reference SDK first on
+#             even ones: an app can start either one first, and the SDK
+#             that starts second wraps the fetch, XHR and error handlers of
+#             the first.
 #   SDK_SETTINGS  ci|shipped: the upload and log settings of both SDKs
 #             (fixtures/fieldwork/src/config.ts, default ci)
 #   REFERENCE_DEBUG  1 starts the reference SDK with its debug log, in the device log
@@ -37,6 +43,7 @@ LAUNCHES="${LAUNCHES:-10}"
 SEED="${SEED:-1}"
 STEPS="${STEPS:-12}"
 ROUND="${ROUND:-1}"
+ORDER="${ORDER:-oodle-first}"
 SDK_SETTINGS="${SDK_SETTINGS:-ci}"
 COLLECTOR=http://localhost:4318
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -52,10 +59,19 @@ DEBUG_JSON=$([ "${REFERENCE_DEBUG:-0}" = 1 ] && echo true || echo false)
 LAUNCHES_FILE="$OUT/launches.ndjson"
 ENDS=(background return kill)
 
+# set_scenario <name> <seed> [order]
 set_scenario() {
   curl -fsS -X POST "$COLLECTOR/fixture/scenario" -d "$(printf \
-    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s,"settings":"%s"}' \
-    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON" "$SDK_SETTINGS")" > /dev/null
+    '{"name":"%s","provider":"%s","replay":%s,"seed":%d,"steps":%d,"debug":%s,"settings":"%s","order":"%s"}' \
+    "$1" "$PROVIDER" "$REPLAY_JSON" "$2" "$STEPS" "$DEBUG_JSON" "$SDK_SETTINGS" "${3:-oodle-first}")" > /dev/null
+}
+
+# The order of the SDKs in launch <n>.
+order_of() {
+  case "$ORDER" in
+    alternate) [ $(($1 % 2)) -eq 1 ] && echo oodle-first || echo reference-first ;;
+    *) echo "$ORDER" ;;
+  esac
 }
 
 # The number of walks of this run that ended and reached the collector,
@@ -80,10 +96,11 @@ clear_app_data
 for i in $(seq 1 "$LAUNCHES"); do
   name="soak-$PREFIX-$i"
   end=${ENDS[$(((i - 1) % ${#ENDS[@]}))]}
+  order=$(order_of "$i")
   # The app ends before the scenario is set, so the collector's time of the
   # set is the start of the launch (the start time in cost.mjs).
   kill_app
-  set_scenario "$name" $((SEED + i))
+  set_scenario "$name" $((SEED + i)) "$order"
   start_app
   frames_reset
   pid=$(app_pid)
@@ -95,7 +112,7 @@ for i in $(seq 1 "$LAUNCHES"); do
     kill)
       cpu=$(cpu_ms "$pid")
       threads=$(thread_cpu_json "$pid")
-      mem=$(mem_kb)
+      mem=$(mem_kb "$pid")
       frames=$(frames_json)
       kill_app
       ;;
@@ -108,14 +125,14 @@ for i in $(seq 1 "$LAUNCHES"); do
       fi
       cpu=$(cpu_ms "$pid")
       threads=$(thread_cpu_json "$pid")
-      mem=$(mem_kb)
+      mem=$(mem_kb "$pid")
       frames=$(frames_json)
       ;;
   esac
-  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
-    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
+  printf '{"platform":"%s","provider":"%s","replay":"%s","settings":"%s","order":"%s","round":"%s","launch":%d,"name":"%s","seed":%d,"end":"%s","start_ms":%s,"cpu_ms":%s,"threads":%s,"mem_kb":%s,"frames":%s}\n' \
+    "$PLATFORM" "$PROVIDER" "$REPLAY" "$SDK_SETTINGS" "$order" "$ROUND" "$i" "$name" $((SEED + i)) "$end" \
     "${START_MS:-null}" "${cpu:-null}" "${threads:-null}" "${mem:-null}" "${frames:-null}" >> "$LAUNCHES_FILE"
-  echo "$name: end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
+  echo "$name: $order, end $end, start ${START_MS:--} ms, cpu ${cpu:--} ms ${threads:-}, mem ${mem:--} KB"
 done
 
 # One more start sends what the SDKs saved: the last launch, or one whose

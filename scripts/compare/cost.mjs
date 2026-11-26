@@ -103,7 +103,11 @@ for (const g of groups.values()) {
   const base = groups.get(`none|${g.replay}`);
   const row = { provider: g.provider, replay: g.replay, rounds: g.rounds.size, launches: g.launches };
   for (const field of [...Object.keys(DEVICE), ...NETWORK]) {
-    row[field] = median(present([...g.rounds.values()].map((r) => r[field])));
+    const perRound = present([...g.rounds.values()].map((r) => r[field]));
+    row[field] = median(perRound);
+    // The spread over the rounds. For the launches with no SDK it is the
+    // noise of the device alone, to read the differences against.
+    if (field in DEVICE && perRound.length) row[`${field}_range`] = { min: Math.min(...perRound), max: Math.max(...perRound) };
     if (field in DEVICE && base && g.provider !== 'none') {
       // The difference in each round that both ran.
       const deltas = present(
@@ -116,6 +120,11 @@ for (const g of groups.values()) {
     }
   }
   const lags = [...g.rounds.values()].flatMap((r) => r.lags);
+  // Launches without a measure (the app was not found, or a tool gave
+  // nothing). The means leave them out, so the report names them.
+  row.missing = Object.fromEntries(
+    ['cpu_ms', 'mem_kb'].map((f) => [f, launches.filter((l) => l.provider === g.provider && l.replay === g.replay && typeof DEVICE[f](l) !== 'number').length]),
+  );
   row.lag_p50_ms = percentile(lags, 50);
   row.lag_p95_ms = percentile(lags, 95);
   rows.push(row);
@@ -130,17 +139,26 @@ const seconds = (ms) => (ms === null ? '–' : num(ms / 1000, 1));
 /** The value, and the median difference from no SDK with its range over the rounds. */
 const withDelta = (row, field, digits = 0) => {
   const d = row[`${field}_delta`];
-  if (row.provider === 'none' || !d) return num(row[field], digits);
+  if (row.provider === 'none') {
+    const r = row[`${field}_range`];
+    return r && r.min !== r.max ? `${num(row[field], digits)} (${num(r.min, digits)}…${num(r.max, digits)})` : num(row[field], digits);
+  }
+  if (!d) return num(row[field], digits);
   const range = d.min === d.max ? '' : `; ${signed(d.min, digits)}…${signed(d.max, digits)}`;
   return `${num(row[field], digits)} (${signed(d.median, digits)}${range})`;
 };
 const sdkName = (r) => (r.provider === 'none' ? 'none (baseline)' : r.provider);
 const settings = [...new Set(launches.map((l) => l.settings ?? 'ci'))].join(', ');
+// launches.ndjson is in the order of the runs, so it gives the order of
+// the SDKs in each round (cost.sh turns it each round).
+const roundOrder = [...groupBy(launches, (l) => l.round).entries()]
+  .map(([round, ls]) => `${round}: ${[...new Set(ls.map((l) => l.provider))].join(', ')}`)
+  .join('; ');
 
 const lines = [
   `## RUM cost: Oodle and the reference SDK (${platform})`,
   '',
-  `Per launch: the median over rounds of the mean over the launches of a round. In brackets: the difference from the launches with no SDK (the median over rounds; then the lowest…highest round). SDK settings: ${settings || '–'}.`,
+  `Per launch: the median over rounds of the mean over the launches of a round. In brackets: the difference from the launches with no SDK (the median over rounds; then the lowest…highest round). For no SDK, in brackets: its lowest…highest round, the noise of the device. SDK settings: ${settings || '–'}. Order of the SDKs in each round: ${roundOrder || '–'}.`,
   '',
   '| Replay | SDK | Launches | CPU ms | Main thread ms | JS thread ms | Memory KB | JS to ready ms | First frame ms | Janky frames |',
   '|---|---|---|---|---|---|---|---|---|---|',
@@ -165,7 +183,17 @@ lines.push(
   '- **JS to ready ms**: from the app\'s read of its scenario (the JS runs) to its call after the SDKs and the first view started, by the clock of the mock collector. It includes one request to the collector and the first render, the same for each SDK. cost.json also has the time from the launch to each of the two (`js_start_ms`, `ready_ms`).',
   '- **First frame ms** (Android): the system\'s time to the first frame of the activity. That is before the JS runs, so it does not include the start of the SDKs.',
   '- **Requests** and **Events KB** leave out client spans, which have their own columns. The reference SDK sends no spans to the collector.',
+  '- **Lag**: from the time of each event to its arrival at the collector. For a view update it is the time of the update; the reference SDK gives a view the time of its start, so the collector adds its time spent.',
 );
+for (const r of rows) {
+  const lost = Object.entries(r.missing ?? {}).filter(([, n]) => n > 0);
+  if (lost.length) {
+    lines.push(
+      '',
+      `**${sdkName(r)}, replay ${r.replay}: launches without a measure** (${lost.map(([f, n]) => `${f} ${n} of ${r.launches}`).join(', ')}). The means leave them out.`,
+    );
+  }
+}
 // An SDK that sent no replay in launches with replay on did no replay
 // work, so its numbers there are not comparable with the other SDK's.
 for (const r of rows) {
